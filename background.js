@@ -40,6 +40,7 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
   batchRunning = true;
   batchStop = false;
   let doneCount = 0;
+  const analysisData = {}; // { competitorDomain: [referringDomain, ...] }
 
   chrome.storage.local.set({ batchState: { running: true, domains, current: 0, done: 0, total: domains.length } });
 
@@ -93,6 +94,39 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
       await sleep(4500);
     } else {
       await sleep(1500);
+    }
+
+    // 抓取表格中的引用域名（用于自动交叉分析）
+    const scrapeRes = await chrome.scripting.executeScript({
+      target: { tabId: semTabId },
+      func: (competitorDomain) => {
+        const seen = new Set();
+        const selectors = [
+          'td a[href^="http"]',
+          '[role="gridcell"] a[href^="http"]',
+          '[role="cell"] a[href^="http"]',
+        ];
+        for (const sel of selectors) {
+          for (const link of document.querySelectorAll(sel)) {
+            try {
+              const d = new URL(link.href).hostname.replace(/^www\./, '').toLowerCase();
+              if (d && d.includes('.') &&
+                  !d.includes(competitorDomain) &&
+                  !competitorDomain.includes(d)) {
+                seen.add(d);
+              }
+            } catch {}
+          }
+        }
+        return [...seen];
+      },
+      args: [domain],
+    }).catch(() => [{ result: [] }]);
+
+    const referrers = scrapeRes[0]?.result || [];
+    if (referrers.length > 0) {
+      analysisData[domain] = referrers;
+      notifyPopup({ type: 'log', msg: `  ✓ 已抓取 ${referrers.length} 个引用域名`, logType: 'ok' });
     }
 
     // 点击导出按钮
@@ -149,7 +183,7 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
     if (i < domains.length - 1 && !batchStop) await sleep(4000);
   }
 
-  notifyPopup({ type: 'done', doneCount, total: domains.length });
+  notifyPopup({ type: 'done', doneCount, total: domains.length, analysisData });
   chrome.storage.local.set({ batchState: { running: false, domains, current: domains.length, done: doneCount, total: domains.length } });
   batchRunning = false;
   batchStop = false;

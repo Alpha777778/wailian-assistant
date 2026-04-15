@@ -235,14 +235,13 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
     $('btn-batch-extract').disabled = false;
     $('btn-batch-stop').disabled = true;
-    // 自动切换到交叉分析 tab
-    setTimeout(() => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      document.querySelector('[data-tab="analyze"]').classList.add('active');
-      $('panel-analyze').classList.add('active');
-      $('analyze-hint').textContent = `批量导出完成！请将下载的 Excel/CSV 文件拖入此处进行交叉分析`;
-    }, 1500);
+    // 自动交叉分析
+    const data = msg.analysisData || {};
+    if (Object.keys(data).length >= 2) {
+      setTimeout(() => runAutoAnalysis(data), 1500);
+    } else if (Object.keys(data).length === 1) {
+      logD('只有 1 个竞品数据，无法交叉分析（需要 2 个以上）', 'info');
+    }
   }
 });
 
@@ -403,6 +402,37 @@ $('btn-run-analyze').addEventListener('click', () => {
   $('btn-export-analyze').disabled = analyzeResults.length === 0;
   $('analyze-hint').textContent = `分析完成：${analyzeResults.length} 个域名出现在 2+ 个文件中`;
 });
+
+function runAutoAnalysis(data) {
+  // 切换到交叉分析 tab
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelector('[data-tab="analyze"]').classList.add('active');
+  $('panel-analyze').classList.add('active');
+
+  const competitors = Object.keys(data);
+  const domainFileSets = {};
+
+  for (const [competitor, referrers] of Object.entries(data)) {
+    for (const domain of referrers) {
+      if (!domainFileSets[domain]) domainFileSets[domain] = new Set();
+      domainFileSets[domain].add(competitor);
+    }
+  }
+
+  analyzeResults = Object.entries(domainFileSets)
+    .map(([domain, fileSet]) => ({ domain, count: fileSet.size, files: [...fileSet] }))
+    .filter(d => d.count >= 2)
+    .sort((a, b) => b.count - a.count);
+
+  // 让手动导出按钮可用（用竞品名作为虚拟文件名）
+  loadedFiles = competitors.map(name => ({ name, rows: [] }));
+
+  renderAnalyzeResults();
+  $('btn-export-analyze').disabled = analyzeResults.length === 0;
+  $('analyze-hint').textContent =
+    `自动分析完成：${analyzeResults.length} 个域名出现在 2+ 个竞品中（共 ${competitors.length} 个竞品）`;
+}
 
 function renderAnalyzeResults() {
   const container = $('result-scroll');
