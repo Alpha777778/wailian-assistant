@@ -235,6 +235,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
     $('btn-batch-extract').disabled = false;
     $('btn-batch-stop').disabled = true;
+    // 自动切换到交叉分析 tab
+    setTimeout(() => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="analyze"]').classList.add('active');
+      $('panel-analyze').classList.add('active');
+      $('analyze-hint').textContent = `批量导出完成！请将下载的 Excel/CSV 文件拖入此处进行交叉分析`;
+    }, 1500);
   }
 });
 
