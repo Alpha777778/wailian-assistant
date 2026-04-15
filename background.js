@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.action === 'startBatchExport') {
     if (batchRunning) { sendResponse({ ok: false, error: '已在运行中' }); return true; }
-    startBatchExport(msg.domains, msg.semTabId).catch(console.error);
+    startBatchExport(msg.domains, msg.semTabId, msg.followOnly !== false, msg.mirror || 'sem.3ue.co').catch(console.error);
     sendResponse({ ok: true });
     return true;
   }
@@ -36,7 +36,7 @@ function notifyPopup(data) {
 }
 
 // ── 批量导出主循环 ─────────────────────────────────────────────────────────────
-async function startBatchExport(domains, semTabId) {
+async function startBatchExport(domains, semTabId, followOnly = true, mirror = 'sem.3ue.co') {
   batchRunning = true;
   batchStop = false;
   let doneCount = 0;
@@ -56,7 +56,7 @@ async function startBatchExport(domains, semTabId) {
     chrome.storage.local.set({ batchState: { running: true, domains, current: i, done: doneCount, total: domains.length } });
 
     // 导航到该域名外链页
-    const url = `https://sem.3ue.co/analytics/backlinks/backlinks/?q=${encodeURIComponent(domain)}&searchType=domain`;
+    const url = `https://${mirror}/analytics/backlinks/backlinks/?q=${encodeURIComponent(domain)}&searchType=domain`;
     try {
       await chrome.tabs.update(semTabId, { url });
     } catch (e) {
@@ -66,8 +66,9 @@ async function startBatchExport(domains, semTabId) {
     await waitForTabLoad(semTabId);
     await sleep(3000);
 
-    // 点击 Follow 过滤
-    const followRes = await chrome.scripting.executeScript({
+    // 点击 Follow 过滤（可选）
+    if (followOnly) {
+      const followRes = await chrome.scripting.executeScript({
       target: { tabId: semTabId },
       func: () => {
         const spans = document.querySelectorAll('[data-ui-name="Button.Text"]');
@@ -83,14 +84,16 @@ async function startBatchExport(domains, semTabId) {
       },
     }).catch(() => [{ result: false }]);
 
-    if (followRes[0]?.result) {
-      notifyPopup({ type: 'log', msg: '  ✓ 已点击 Follow 过滤', logType: 'ok' });
+      if (followRes[0]?.result) {
+        notifyPopup({ type: 'log', msg: '  ✓ 已点击 Follow 过滤', logType: 'ok' });
+      } else {
+        notifyPopup({ type: 'log', msg: '  ⚠ 未找到 Follow 按钮，直接导出', logType: 'info' });
+      }
+      // 等待页面刷新后导出按钮可用
+      await sleep(4500);
     } else {
-      notifyPopup({ type: 'log', msg: '  ⚠ 未找到 Follow 按钮，直接导出', logType: 'info' });
+      await sleep(1500);
     }
-
-    // 等待页面刷新后导出按钮可用
-    await sleep(4500);
 
     // 点击导出按钮
     const exportRes = await chrome.scripting.executeScript({

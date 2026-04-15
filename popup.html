@@ -6,169 +6,170 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
-  width: 420px;
+  width: 460px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 13px;
-  background: #0f1117;
-  color: #e2e8f0;
+  background: #f8fafc;
+  color: #1e293b;
 }
 .header {
-  background: linear-gradient(135deg, #1a1f2e, #252b3b);
-  padding: 12px 16px;
-  border-bottom: 1px solid #2d3748;
+  background: #fff;
+  padding: 11px 16px;
+  border-bottom: 1px solid #e2e8f0;
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.header img { width: 24px; height: 24px; border-radius: 4px; }
-.header h1 { font-size: 14px; font-weight: 700; color: #fff; flex: 1; }
-.header .ver { font-size: 10px; color: #4a5568; }
+.header img { width: 22px; height: 22px; border-radius: 4px; }
+.header h1 { font-size: 14px; font-weight: 700; color: #0f172a; flex: 1; }
+.header .ver { font-size: 10px; color: #94a3b8; }
 
 /* 标签页 */
 .tabs {
   display: flex;
-  background: #0a0d14;
-  border-bottom: 1px solid #1e2535;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
 }
 .tab {
   flex: 1;
-  padding: 8px 4px;
+  padding: 9px 4px;
   text-align: center;
   font-size: 12px;
-  color: #4a5568;
+  color: #94a3b8;
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
+  font-weight: 500;
 }
 .tab.active { color: #3b82f6; border-bottom-color: #3b82f6; }
-.tab:hover:not(.active) { color: #94a3b8; }
-.tab-badge {
-  display: inline-block;
-  background: #1e3a5f;
-  color: #60a5fa;
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 8px;
-  margin-left: 3px;
-}
+.tab:hover:not(.active) { color: #475569; }
 
 /* 面板 */
 .panel { display: none; }
 .panel.active { display: block; }
-
-.section { padding: 10px 14px; border-bottom: 1px solid #1e2535; }
-.section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #4a5568; margin-bottom: 7px; }
-
-/* 统计 */
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.stat { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 5px; padding: 6px; text-align: center; }
-.stat-num { font-size: 18px; font-weight: 700; color: #3b82f6; }
-.stat-num.green { color: #10b981; }
-.stat-num.yellow { color: #f59e0b; }
-.stat-label { font-size: 9px; color: #4a5568; margin-top: 1px; }
+.section { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; }
+.section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; margin-bottom: 8px; font-weight: 600; }
 
 /* 表单 */
-.form-row { margin-bottom: 7px; }
+.form-row { margin-bottom: 8px; }
 .form-row label { display: block; font-size: 11px; color: #64748b; margin-bottom: 3px; }
 .form-row input, .form-row textarea, .form-row select {
   width: 100%;
-  background: #1a1f2e;
-  border: 1px solid #2d3748;
-  border-radius: 5px;
-  padding: 5px 8px;
-  color: #e2e8f0;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: #1e293b;
   font-size: 12px;
   outline: none;
+  transition: border-color 0.15s;
 }
-.form-row input:focus, .form-row textarea:focus { border-color: #3b82f6; }
-.form-row textarea { resize: vertical; min-height: 50px; }
+.form-row input:focus, .form-row textarea:focus { border-color: #3b82f6; background: #fff; }
+.form-row textarea { resize: vertical; min-height: 52px; }
 .form-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .form-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 
 /* 按钮 */
-.btn { padding: 7px 12px; border: none; border-radius: 5px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.btn { padding: 7px 13px; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
 .btn-block { width: 100%; }
 .btn-primary { background: #3b82f6; color: #fff; }
 .btn-primary:hover { background: #2563eb; }
-.btn-primary:disabled { background: #1e3a5f; color: #4a6fa5; cursor: not-allowed; }
+.btn-primary:disabled { background: #bfdbfe; color: #93c5fd; cursor: not-allowed; }
 .btn-success { background: #10b981; color: #fff; }
 .btn-success:hover { background: #059669; }
-.btn-success:disabled { background: #064e3b; color: #34d399; cursor: not-allowed; }
+.btn-success:disabled { background: #a7f3d0; color: #6ee7b7; cursor: not-allowed; }
 .btn-danger { background: #ef4444; color: #fff; }
 .btn-danger:hover { background: #dc2626; }
-.btn-gray { background: #1e2535; color: #94a3b8; }
-.btn-gray:hover { background: #2d3748; }
+.btn-danger:disabled { background: #fecaca; color: #fca5a5; cursor: not-allowed; }
+.btn-gray { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.btn-gray:hover { background: #e2e8f0; }
 .btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .btn-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 
 /* 进度条 */
-.progress-bar { height: 3px; background: #1e2535; border-radius: 2px; margin-top: 7px; overflow: hidden; }
+.progress-bar { height: 3px; background: #e2e8f0; border-radius: 2px; margin-top: 8px; overflow: hidden; }
 .progress-fill { height: 100%; background: #3b82f6; border-radius: 2px; transition: width 0.3s; width: 0%; }
 
 /* 日志 */
 .log-box {
-  background: #0a0d14;
-  border: 1px solid #1e2535;
-  border-radius: 5px;
-  padding: 7px;
-  height: 100px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 7px 9px;
+  height: 110px;
   overflow-y: auto;
   font-size: 11px;
-  font-family: monospace;
+  font-family: 'Consolas', monospace;
   color: #64748b;
 }
-.log-box .ok { color: #10b981; }
-.log-box .err { color: #ef4444; }
-.log-box .info { color: #3b82f6; }
+.log-box .ok  { color: #059669; }
+.log-box .err { color: #dc2626; }
+.log-box .info { color: #2563eb; }
 
-/* 外链列表 */
-.link-list { max-height: 280px; overflow-y: auto; }
-.link-item {
-  padding: 7px 10px;
-  border-bottom: 1px solid #1a1f2e;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-.link-item:hover { background: #1a1f2e; }
-.link-as {
-  min-width: 28px;
+/* checkbox 行 */
+.check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #475569; }
+.check-row input[type=checkbox] { width: 14px; height: 14px; accent-color: #3b82f6; cursor: pointer; }
+
+/* 交叉分析 */
+.drop-zone {
+  border: 2px dashed #cbd5e1;
+  border-radius: 8px;
+  padding: 20px;
   text-align: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: #3b82f6;
-  padding-top: 1px;
-}
-.link-body { flex: 1; min-width: 0; }
-.link-url { font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.link-meta { font-size: 10px; color: #4a5568; margin-top: 2px; display: flex; gap: 6px; align-items: center; }
-.tag { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 600; }
-.tag-blue { background: #1e3a5f; color: #60a5fa; }
-.tag-green { background: #064e3b; color: #34d399; }
-.tag-yellow { background: #451a03; color: #fbbf24; }
-.tag-gray { background: #1e2535; color: #64748b; }
-.tag-red { background: #450a0a; color: #f87171; }
-
-/* 竞品分组 */
-.competitor-group { margin-bottom: 2px; }
-.competitor-header {
-  padding: 6px 10px;
-  background: #1a1f2e;
-  font-size: 11px;
-  font-weight: 600;
   color: #94a3b8;
+  font-size: 12px;
   cursor: pointer;
+  transition: all 0.15s;
+  background: #fff;
+}
+.drop-zone.drag-over { border-color: #3b82f6; background: #eff6ff; color: #3b82f6; }
+.drop-zone strong { display: block; font-size: 13px; color: #475569; margin-bottom: 4px; }
+
+.file-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.file-chip {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 12px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
 }
-.competitor-header:hover { background: #252b3b; }
-.competitor-count { font-size: 10px; color: #4a5568; }
+.file-chip .rm { cursor: pointer; color: #93c5fd; font-size: 12px; line-height: 1; }
+.file-chip .rm:hover { color: #1d4ed8; }
 
-/* 空状态 */
-.empty { padding: 30px; text-align: center; color: #4a5568; font-size: 12px; }
+.result-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.result-table th {
+  background: #f1f5f9;
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 600;
+  border-bottom: 1px solid #e2e8f0;
+  position: sticky;
+  top: 0;
+}
+.result-table td { padding: 5px 8px; border-bottom: 1px solid #f1f5f9; color: #334155; }
+.result-table tr:hover td { background: #f8fafc; }
+.result-table .cnt-badge {
+  display: inline-block;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+.result-table .cnt-badge.hot { background: #fef3c7; color: #92400e; }
+.result-table .cnt-badge.top { background: #dcfce7; color: #166534; }
+.result-scroll { max-height: 260px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; }
 
-#status-bar { padding: 6px 14px; font-size: 10px; color: #4a5568; text-align: center; border-top: 1px solid #1e2535; }
+.empty { padding: 28px; text-align: center; color: #94a3b8; font-size: 12px; }
+
+#status-bar { padding: 6px 16px; font-size: 10px; color: #94a3b8; text-align: center; border-top: 1px solid #e2e8f0; background: #fff; }
 </style>
 </head>
 <body>
@@ -176,105 +177,86 @@ body {
 <div class="header">
   <img src="icon48.png" alt="">
   <h1>外链助手</h1>
-  <span class="ver">v1.0</span>
+  <span class="ver">v2.0</span>
 </div>
 
 <div class="tabs">
-  <div class="tab active" data-tab="extract">提取</div>
-  <div class="tab" data-tab="saved">已保存 <span class="tab-badge" id="badge-saved">0</span></div>
-  <div class="tab" data-tab="submit">提交</div>
-  <div class="tab" data-tab="discover">竞品发现</div>
+  <div class="tab active" data-tab="discover">竞品发现</div>
+  <div class="tab" data-tab="analyze">交叉分析</div>
   <div class="tab" data-tab="config">配置</div>
 </div>
 
-<!-- ── 提取面板 ── -->
-<div class="panel active" id="panel-extract">
+<!-- ── 竞品发现面板 ── -->
+<div class="panel active" id="panel-discover">
   <div class="section">
-    <div class="section-title">当前提取</div>
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-num" id="cnt-total">0</div>
-        <div class="stat-label">已提取</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num green" id="cnt-blog">0</div>
-        <div class="stat-label">博客</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num yellow" id="cnt-content">0</div>
-        <div class="stat-label">正文</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num" id="cnt-pages">0</div>
-        <div class="stat-label">页数</div>
-      </div>
+    <div class="section-title">第一步：搜索竞品</div>
+    <div class="form-row" style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="discover-keyword" placeholder="输入关键词，如 tattoo ai" style="flex:1">
+      <button class="btn btn-primary" id="btn-google-search" style="white-space:nowrap">Google 搜索</button>
     </div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:5px">将在新标签页打开 Google，自动提取前 10 名域名</div>
   </div>
   <div class="section">
-    <div class="btn-row">
-      <button class="btn btn-primary" id="btn-extract">提取当前页外链</button>
-      <button class="btn btn-gray" id="btn-save-csv">导出 Excel</button>
+    <div class="section-title">发现的竞品域名 <span style="color:#94a3b8;font-weight:400">（可手动编辑）</span></div>
+    <textarea id="discover-domains" rows="5" style="width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 9px;color:#1e293b;font-size:11px;font-family:monospace;resize:vertical;outline:none" placeholder="每行一个域名，例如：&#10;tattoo.ai&#10;inkbox.com&#10;tattoodo.com"></textarea>
+    <div style="font-size:10px;color:#94a3b8;margin-top:4px" id="discover-domain-count">0 个域名</div>
+  </div>
+  <div class="section">
+    <div class="section-title">第二步：批量导出外链</div>
+    <div style="font-size:10px;color:#94a3b8;margin-bottom:8px">请先手动打开 sem.3ue.co 并登录，点击后自动逐个导航 → 过滤 → 导出 Excel</div>
+    <div class="check-row" style="margin-bottom:8px">
+      <input type="checkbox" id="opt-follow-only" checked>
+      <label for="opt-follow-only" style="cursor:pointer">只选 Follow 链接（点击 Follow 过滤后再导出）</label>
     </div>
-    <div class="progress-bar"><div class="progress-fill" id="progress-extract"></div></div>
+    <div class="btn-row">
+      <button class="btn btn-success" id="btn-batch-extract" disabled>开始批量导出</button>
+      <button class="btn btn-danger" id="btn-batch-stop" disabled>停止</button>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progress-discover"></div></div>
+    <div style="font-size:11px;color:#3b82f6;margin-top:6px" id="discover-current">就绪</div>
   </div>
   <div class="section">
     <div class="section-title">运行日志</div>
-    <div class="log-box" id="log-extract"></div>
+    <div class="log-box" id="log-discover"></div>
   </div>
 </div>
 
-<!-- ── 已保存面板 ── -->
-<div class="panel" id="panel-saved">
+<!-- ── 交叉分析面板 ── -->
+<div class="panel" id="panel-analyze">
   <div class="section">
-    <div class="btn-row-3">
-      <button class="btn btn-gray" id="btn-export-all">导出全部</button>
-      <button class="btn btn-gray" id="btn-export-pending">导出待提交</button>
-      <button class="btn btn-danger" id="btn-clear-all">清空</button>
+    <div class="section-title">拖入竞品外链 CSV 文件（可多个）</div>
+    <div class="drop-zone" id="drop-zone">
+      <strong>拖拽 CSV / Excel 文件到此处</strong>
+      点击也可选择文件
+      <input type="file" id="file-input" multiple accept=".csv,.xlsx,.xls" style="display:none">
     </div>
-  </div>
-  <div class="link-list" id="saved-list">
-    <div class="empty">暂无保存的外链<br>提取后自动保存</div>
-  </div>
-</div>
-
-<!-- ── 提交面板 ── -->
-<div class="panel" id="panel-submit">
-  <div class="section">
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-num yellow" id="cnt-pending">0</div>
-        <div class="stat-label">待提交</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num green" id="cnt-done">0</div>
-        <div class="stat-label">已完成</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num" style="color:#ef4444" id="cnt-failed">0</div>
-        <div class="stat-label">失败</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num" id="cnt-skip">0</div>
-        <div class="stat-label">跳过</div>
-      </div>
-    </div>
+    <div class="file-chips" id="file-chips"></div>
   </div>
   <div class="section">
     <div class="btn-row">
-      <button class="btn btn-success btn-block" id="btn-start-submit" disabled>开始提交</button>
-      <button class="btn btn-gray" id="btn-reset-failed">重置失败</button>
+      <button class="btn btn-primary" id="btn-run-analyze" disabled>开始分析</button>
+      <button class="btn btn-gray" id="btn-export-analyze" disabled>导出结果 CSV</button>
     </div>
-    <div class="progress-bar"><div class="progress-fill" id="progress-submit"></div></div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="analyze-hint">加载 2 个以上文件后开始分析</div>
   </div>
-  <div class="section">
-    <div class="log-box" id="log-submit"></div>
+  <div class="section" style="padding:0">
+    <div class="result-scroll" id="result-scroll">
+      <div class="empty">分析结果将在此显示<br>域名出现在越多文件中，说明越值得发外链</div>
+    </div>
   </div>
 </div>
 
 <!-- ── 配置面板 ── -->
 <div class="panel" id="panel-config">
   <div class="section">
-    <div class="section-title">评论者信息</div>
+    <div class="section-title">SEMrush 镜像站</div>
+    <div class="form-row">
+      <label>镜像站域名（默认 sem.3ue.co）</label>
+      <input type="text" id="cfg-mirror" placeholder="sem.3ue.co">
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-title">评论者信息（提交用）</div>
     <div class="form-2">
       <div class="form-row">
         <label>名字</label>
@@ -286,29 +268,8 @@ body {
       </div>
     </div>
     <div class="form-row">
-      <label>你的网站 URL（放在评论 URL 字段）</label>
+      <label>你的网站 URL</label>
       <input type="url" id="cfg-site" placeholder="https://yoursite.com">
-    </div>
-    <div class="form-row">
-      <label>评论内容（留空随机）</label>
-      <textarea id="cfg-comment" placeholder="留空则每次随机选择评论模板..."></textarea>
-    </div>
-  </div>
-  <div class="section">
-    <div class="section-title">提交参数</div>
-    <div class="form-3">
-      <div class="form-row">
-        <label>最小 AS 分</label>
-        <input type="number" id="cfg-min-as" value="10" min="0" max="100">
-      </div>
-      <div class="form-row">
-        <label>间隔(秒)</label>
-        <input type="number" id="cfg-delay" value="45" min="10" max="300">
-      </div>
-      <div class="form-row">
-        <label>每批数量</label>
-        <input type="number" id="cfg-batch" value="20" min="1" max="100">
-      </div>
     </div>
   </div>
   <div class="section">
@@ -317,37 +278,6 @@ body {
 </div>
 
 <div id="status-bar">就绪</div>
-
-<!-- ── 竞品发现面板 ── -->
-<div class="panel" id="panel-discover">
-  <div class="section">
-    <div class="section-title">第一步：搜索竞品</div>
-    <div class="form-row" style="display:flex;gap:8px;align-items:center">
-      <input type="text" id="discover-keyword" placeholder="输入关键词，如 tattoo ai" style="flex:1">
-      <button class="btn btn-primary" id="btn-google-search" style="white-space:nowrap">Google 搜索</button>
-    </div>
-    <div style="font-size:10px;color:#4a5568;margin-top:5px">将在新标签页打开 Google，自动提取前 10 名域名</div>
-  </div>
-  <div class="section">
-    <div class="section-title">发现的竞品域名 <span style="color:#4a5568;font-weight:400">（可手动编辑）</span></div>
-    <textarea id="discover-domains" rows="6" style="width:100%;background:#1a1f2e;border:1px solid #2d3748;border-radius:5px;padding:6px 8px;color:#e2e8f0;font-size:11px;font-family:monospace;resize:vertical" placeholder="每行一个域名，例如：&#10;tattoo.ai&#10;inkbox.com&#10;tattoodo.com"></textarea>
-    <div style="font-size:10px;color:#4a5568;margin-top:4px" id="discover-domain-count">0 个域名</div>
-  </div>
-  <div class="section">
-    <div class="section-title">第二步：批量提取外链</div>
-    <div style="font-size:10px;color:#4a5568;margin-bottom:8px">请先手动打开 sem.3ue.co 并登录，点击后将自动逐个导航 → 点 Follow → 导出 Excel 到下载目录</div>
-    <div class="btn-row">
-      <button class="btn btn-success" id="btn-batch-extract" disabled>开始批量导出</button>
-      <button class="btn btn-danger" id="btn-batch-stop" disabled>停止</button>
-    </div>
-    <div class="progress-bar"><div class="progress-fill" id="progress-discover"></div></div>
-    <div style="font-size:11px;color:#60a5fa;margin-top:6px" id="discover-current">就绪</div>
-  </div>
-  <div class="section">
-    <div class="section-title">运行日志</div>
-    <div class="log-box" id="log-discover"></div>
-  </div>
-</div>
 
 <script src="popup.js"></script>
 </body>
