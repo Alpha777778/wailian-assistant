@@ -280,14 +280,31 @@ fileInput.addEventListener('change', () => {
 function handleFiles(files) {
   for (const file of files) {
     if (loadedFiles.find(f => f.name === file.name)) continue;
+    const isExcel = /\.(xlsx|xls)$/i.test(file.name);
     const reader = new FileReader();
-    reader.onload = e => {
-      const rows = parseCSVText(e.target.result);
-      loadedFiles.push({ name: file.name, rows });
-      renderFileChips();
-      updateAnalyzeHint();
-    };
-    reader.readAsText(file, 'utf-8');
+    if (isExcel) {
+      reader.onload = e => {
+        try {
+          const wb = XLSX.read(e.target.result, { type: 'array' });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+          loadedFiles.push({ name: file.name, rows });
+          renderFileChips();
+          updateAnalyzeHint();
+        } catch (err) {
+          console.error('Excel 解析失败', file.name, err);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = e => {
+        const rows = parseCSVText(e.target.result);
+        loadedFiles.push({ name: file.name, rows });
+        renderFileChips();
+        updateAnalyzeHint();
+      };
+      reader.readAsText(file, 'utf-8');
+    }
   }
 }
 
