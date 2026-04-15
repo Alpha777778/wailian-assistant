@@ -151,31 +151,27 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
       continue;
     }
 
-    // 等下拉菜单出现
-    await sleep(2000);
+    // 等下拉菜单出现（增加到 3s）
+    await sleep(3000);
 
-    // 点击 Excel 选项（用 data-ui-name="DropdownMenu.Item" + value="xls" 精准定位）
+    // 点击 Excel 选项
     const xlsRes = await chrome.scripting.executeScript({
       target: { tabId: semTabId },
       func: () => {
-        // 优先用 data-test-export-type 或 value 属性精准定位
+        function fire(el) {
+          ['mousedown','mouseup','click'].forEach(type =>
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true }))
+          );
+        }
         const byAttr = document.querySelector(
           '[data-ui-name="DropdownMenu.Item"][value="xls"], [data-test-export-type="xls"]'
         );
-        if (byAttr) { byAttr.click(); return true; }
-
-        // 备用：找文本为 Excel 的 DropdownMenu.Item
-        for (const el of document.querySelectorAll('[data-ui-name="DropdownMenu.Item"]')) {
-          if (el.textContent.trim() === 'Excel') { el.click(); return true; }
+        if (byAttr) { fire(byAttr); return true; }
+        for (const el of document.querySelectorAll('[role="menuitem"]')) {
+          if (el.textContent.trim() === 'Excel') { fire(el); return true; }
         }
-
-        // 最后兜底：任意可见叶节点文本为 Excel
-        for (const el of document.querySelectorAll('*')) {
-          if (el.children.length === 0 &&
-              el.textContent.trim() === 'Excel' &&
-              el.offsetParent !== null) {
-            el.click(); return true;
-          }
+        for (const el of document.querySelectorAll('[data-ui-name="DropdownMenu.Item"]')) {
+          if (el.textContent.trim() === 'Excel') { fire(el); return true; }
         }
         return false;
       },

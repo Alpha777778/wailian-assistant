@@ -112,9 +112,7 @@ function getDiscoverDomains() {
 }
 
 function updateDomainCount() {
-  const n = getDiscoverDomains().length;
-  $('discover-domain-count').textContent = `${n} 个域名`;
-  $('btn-batch-extract').disabled = n === 0;
+  $('discover-domain-count').textContent = `${getDiscoverDomains().length} 个域名`;
 }
 
 $('discover-domains').addEventListener('input', () => {
@@ -149,72 +147,81 @@ function extractGoogleDomains() {
   return domains;
 }
 
-// Google 搜索 → 提取前10域名
-$('btn-google-search').addEventListener('click', async () => {
+// ── 一键开始：Google搜索 → 批量导出 → 交叉分析 ──────────────────────────────
+$('btn-one-click').addEventListener('click', async () => {
   const keyword = $('discover-keyword').value.trim();
-  if (!keyword) { logD('请输入关键词', 'err'); return; }
+  const existingDomains = getDiscoverDomains();
 
-  $('btn-google-search').disabled = true;
-  $('btn-google-search').textContent = '搜索中...';
-  logD(`正在搜索: ${keyword}`, 'info');
-
-  try {
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(keyword)}&num=20`;
-    const newTab = await chrome.tabs.create({ url: searchUrl, active: false });
-    await waitForTabLoad(newTab.id);
-    await sleep(2500);
-
-    const res = await chrome.scripting.executeScript({
-      target: { tabId: newTab.id },
-      func: extractGoogleDomains,
-    });
-    chrome.tabs.remove(newTab.id);
-
-    const domains = res[0]?.result || [];
-    if (domains.length === 0) {
-      logD('未提取到域名，Google 可能需要验证码，请手动填写', 'err');
-    } else {
-      $('discover-domains').value = domains.join('\n');
-      chrome.storage.local.set({ discoverDomains: domains.join('\n') });
-      updateDomainCount();
-      logD(`已提取 ${domains.length} 个竞品域名`, 'ok');
-    }
-  } catch (e) {
-    logD(`搜索失败: ${e.message}`, 'err');
+  if (!keyword && existingDomains.length === 0) {
+    logD('请输入关键词或手动填写竞品域名', 'err'); return;
   }
-
-  $('btn-google-search').disabled = false;
-  $('btn-google-search').textContent = 'Google 搜索';
-});
-
-// 批量导出 — 委托给 background.js 执行，popup 关闭不中断
-$('btn-batch-extract').addEventListener('click', async () => {
-  const domains = getDiscoverDomains();
-  if (domains.length === 0) { logD('请先添加竞品域名', 'err'); return; }
 
   const cfg = await getConfig();
   const mirror = cfg.mirror || 'sem.3ue.co';
-  const followOnly = $('opt-follow-only').checked;
-
   const allTabs = await chrome.tabs.query({});
   const semTab = allTabs.find(t => t.url && (
     t.url.includes('semrush.com') || t.url.includes(mirror)
   ));
   if (!semTab) {
-    logD(`请先手动打开 ${mirror} 并登录，然后再点击此按钮`, 'err');
+    logD(`请先手动打开 ${mirror} 并登录，然后再点击`, 'err'); return;
+  }
+
+  $('btn-one-click').disabled = true;
+  $('btn-batch-stop').disabled = false;
+
+  let domains = existingDomains;
+
+  // Step 1: Google 搜索（有关键词时执行）
+  if (keyword) {
+    $('btn-one-click').textContent = '搜索中...';
+    logD(`正在搜索: ${keyword}`, 'info');
+    try {
+      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(keyword)}&num=20`;
+      const newTab = await chrome.tabs.create({ url: searchUrl, active: false });
+      await waitForTabLoad(newTab.id);
+      await sleep(2500);
+      const res = await chrome.scripting.executeScript({
+        target: { tabId: newTab.id },
+        func: extractGoogleDomains,
+      });
+      chrome.tabs.remove(newTab.id);
+      const found = res[0]?.result || [];
+      if (found.length > 0) {
+        domains = found;
+        $('discover-domains').value = domains.join('\n');
+        chrome.storage.local.set({ discoverDomains: domains.join('\n') });
+        updateDomainCount();
+        logD(`已提取 ${domains.length} 个竞品域名`, 'ok');
+      } else {
+        logD('未提取到域名（Google 验证码？），使用已有域名列表', 'info');
+      }
+    } catch (e) {
+      logD(`搜索失败: ${e.message}，使用已有域名列表`, 'err');
+    }
+  }
+
+  if (domains.length === 0) {
+    logD('没有可用的竞品域名', 'err');
+    $('btn-one-click').disabled = false;
+    $('btn-one-click').textContent = '一键开始';
+    $('btn-batch-stop').disabled = true;
     return;
   }
 
+  // Step 2: 批量导出（background.js 执行，关闭 popup 不中断）
+  $('btn-one-click').textContent = '导出中...';
+  logD(`开始批量导出 ${domains.length} 个竞品...`, 'info');
+  const followOnly = $('opt-follow-only').checked;
   const res = await chrome.runtime.sendMessage({
     action: 'startBatchExport', domains, semTabId: semTab.id, followOnly, mirror,
   });
-  if (res.ok) {
-    $('btn-batch-extract').disabled = true;
-    $('btn-batch-stop').disabled = false;
-    logD(`已启动批量导出（${domains.length} 个域名，${followOnly ? '仅 Follow' : '全部'}）— 关闭此窗口不会中断`, 'info');
-  } else {
+  if (!res.ok) {
     logD(`启动失败: ${res.error}`, 'err');
+    $('btn-one-click').disabled = false;
+    $('btn-one-click').textContent = '一键开始';
+    $('btn-batch-stop').disabled = true;
   }
+  // Step 3: 交叉分析在 done 消息里自动触发
 });
 
 $('btn-batch-stop').addEventListener('click', async () => {
@@ -233,9 +240,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   } else if (msg.type === 'done') {
     $('progress-discover').style.width = '100%';
     $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
-    $('btn-batch-extract').disabled = false;
+    $('btn-one-click').disabled = false;
+    $('btn-one-click').textContent = '一键开始';
     $('btn-batch-stop').disabled = true;
-    // 自动交叉分析
     const data = msg.analysisData || {};
     if (Object.keys(data).length >= 2) {
       setTimeout(() => runAutoAnalysis(data), 1500);
@@ -500,7 +507,8 @@ $('btn-export-analyze').addEventListener('click', () => {
 
   const bs = stored.batchState;
   if (bs?.running) {
-    $('btn-batch-extract').disabled = true;
+    $('btn-one-click').disabled = true;
+    $('btn-one-click').textContent = '导出中...';
     $('btn-batch-stop').disabled = false;
     $('discover-current').textContent = `后台运行中... [${bs.current}/${bs.total}] 已完成 ${bs.done} 个`;
     $('progress-discover').style.width = Math.round((bs.current / bs.total) * 100) + '%';
