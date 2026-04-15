@@ -15,18 +15,52 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 // ── 日志 ──────────────────────────────────────────────────────────────────────
+// 每个日志框最多保留的条数
+const LOG_MAX = 80;
+
+// 日志存储 key 映射
+const LOG_STORE = { 'log-extract': 'logExtract', 'log-submit': 'logSubmit', 'log-discover': 'logDiscover' };
+
 function log(boxId, msg, type = '') {
   const box = $(boxId);
   const line = document.createElement('div');
   line.className = type;
-  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  const text = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  line.textContent = text;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
+
+  // 持久化日志到 storage
+  const key = LOG_STORE[boxId];
+  if (key) {
+    chrome.storage.local.get(key, d => {
+      const arr = d[key] || [];
+      arr.push({ text, type });
+      if (arr.length > LOG_MAX) arr.splice(0, arr.length - LOG_MAX);
+      chrome.storage.local.set({ [key]: arr });
+    });
+  }
 }
+
+function restoreLog(boxId, entries) {
+  const box = $(boxId);
+  box.innerHTML = '';
+  for (const e of entries) {
+    const line = document.createElement('div');
+    line.className = e.type || '';
+    line.textContent = e.text;
+    box.appendChild(line);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
 const logE = (m, t) => log('log-extract', m, t);
 const logS = (m, t) => log('log-submit', m, t);
 
-function setStatus(msg) { $('status-bar').textContent = msg; }
+function setStatus(msg) {
+  $('status-bar').textContent = msg;
+  chrome.storage.local.set({ statusBar: msg });
+}
 
 // ── 存储操作 ──────────────────────────────────────────────────────────────────
 async function getLinks() {
@@ -107,6 +141,13 @@ $('btn-extract').addEventListener('click', async () => {
       $('cnt-total').textContent = currentExtracted.length;
       $('cnt-blog').textContent = currentExtracted.filter(l => l.isBlog).length;
       $('cnt-content').textContent = currentExtracted.filter(l => l.placement === 'content').length;
+      // 持久化统计
+      chrome.storage.local.set({ extractStats: {
+        total: currentExtracted.length,
+        blog: currentExtracted.filter(l => l.isBlog).length,
+        content: currentExtracted.filter(l => l.placement === 'content').length,
+        pages: pageNum,
+      }});
 
       // 如果这一页没有一条达到 minAs，说明后面全是低分，直接停
       const pageQualified = pageLinks.filter(l => l.as >= minAs).length;
@@ -741,10 +782,33 @@ $('btn-batch-stop').addEventListener('click', () => {
 (async () => {
   await loadConfigToForm();
   await refreshBadge();
-  setStatus('就绪 — 打开 SEMrush 反向链接页面后点击"提取外链"');
 
-  // 恢复竞品发现面板的内容
-  const stored = await new Promise(r => chrome.storage.local.get(['discoverDomains', 'discoverKeyword'], r));
+  // 恢复所有持久化状态
+  const stored = await new Promise(r => chrome.storage.local.get([
+    'discoverDomains', 'discoverKeyword',
+    'logExtract', 'logSubmit', 'logDiscover',
+    'statusBar', 'extractStats',
+  ], r));
+
+  // 恢复状态栏
+  if (stored.statusBar) setStatus(stored.statusBar);
+  else setStatus('就绪 — 打开 SEMrush 反向链接页面后点击"提取外链"');
+
+  // 恢复日志
+  if (stored.logExtract?.length) restoreLog('log-extract', stored.logExtract);
+  if (stored.logSubmit?.length)  restoreLog('log-submit',  stored.logSubmit);
+  if (stored.logDiscover?.length) restoreLog('log-discover', stored.logDiscover);
+
+  // 恢复提取统计
+  if (stored.extractStats) {
+    const s = stored.extractStats;
+    if (s.total !== undefined) $('cnt-total').textContent = s.total;
+    if (s.blog  !== undefined) $('cnt-blog').textContent  = s.blog;
+    if (s.content !== undefined) $('cnt-content').textContent = s.content;
+    if (s.pages !== undefined) $('cnt-pages').textContent = s.pages;
+  }
+
+  // 恢复竞品发现面板
   if (stored.discoverKeyword) $('discover-keyword').value = stored.discoverKeyword;
   if (stored.discoverDomains) {
     $('discover-domains').value = stored.discoverDomains;
