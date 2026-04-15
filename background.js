@@ -1,13 +1,158 @@
-// background.js — 处理评论提交（在独立 tab 中操作）
+// background.js — 处理评论提交 + 批量导出（在独立 tab 中操作）
+
+let batchRunning = false;
+let batchStop = false;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'submitComment') {
     submitToUrl(msg.url, msg.config)
       .then(result => sendResponse(result))
       .catch(e => sendResponse({ success: false, error: e.message }));
-    return true; // 异步响应
+    return true;
+  }
+
+  if (msg.action === 'startBatchExport') {
+    if (batchRunning) { sendResponse({ ok: false, error: '已在运行中' }); return true; }
+    startBatchExport(msg.domains, msg.semTabId).catch(console.error);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'stopBatchExport') {
+    batchStop = true;
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (msg.action === 'getBatchStatus') {
+    sendResponse({ running: batchRunning });
+    return;
   }
 });
+
+// 向 popup 推送进度（popup 关着时静默忽略）
+function notifyPopup(data) {
+  chrome.runtime.sendMessage({ action: 'batchProgress', ...data }).catch(() => {});
+}
+
+// ── 批量导出主循环 ─────────────────────────────────────────────────────────────
+async function startBatchExport(domains, semTabId) {
+  batchRunning = true;
+  batchStop = false;
+  let doneCount = 0;
+
+  chrome.storage.local.set({ batchState: { running: true, domains, current: 0, done: 0, total: domains.length } });
+
+  for (let i = 0; i < domains.length; i++) {
+    if (batchStop) {
+      notifyPopup({ type: 'log', msg: '已停止', logType: 'info' });
+      break;
+    }
+
+    const domain = domains[i];
+    const pct = Math.round((i / domains.length) * 100);
+    notifyPopup({ type: 'progress', pct, current: `[${i+1}/${domains.length}] 正在处理: ${domain}` });
+    notifyPopup({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain}`, logType: 'info' });
+    chrome.storage.local.set({ batchState: { running: true, domains, current: i, done: doneCount, total: domains.length } });
+
+    // 导航到该域名外链页
+    const url = `https://sem.3ue.co/analytics/backlinks/backlinks/?q=${encodeURIComponent(domain)}&searchType=domain`;
+    try {
+      await chrome.tabs.update(semTabId, { url });
+    } catch (e) {
+      notifyPopup({ type: 'log', msg: `  ✗ 无法导航（镜像站 tab 已关闭？）: ${e.message}`, logType: 'err' });
+      break;
+    }
+    await waitForTabLoad(semTabId);
+    await sleep(3000);
+
+    // 点击 Follow 过滤
+    const followRes = await chrome.scripting.executeScript({
+      target: { tabId: semTabId },
+      func: () => {
+        const spans = document.querySelectorAll('[data-ui-name="Button.Text"]');
+        for (const el of spans) {
+          if (el.textContent.trim() === 'Follow') {
+            (el.closest('button') || el.parentElement).click(); return true;
+          }
+        }
+        for (const btn of document.querySelectorAll('button')) {
+          if (btn.textContent.trim() === 'Follow') { btn.click(); return true; }
+        }
+        return false;
+      },
+    }).catch(() => [{ result: false }]);
+
+    if (followRes[0]?.result) {
+      notifyPopup({ type: 'log', msg: '  ✓ 已点击 Follow 过滤', logType: 'ok' });
+    } else {
+      notifyPopup({ type: 'log', msg: '  ⚠ 未找到 Follow 按钮，直接导出', logType: 'info' });
+    }
+
+    // 等待页面刷新后导出按钮可用
+    await sleep(4500);
+
+    // 点击导出按钮
+    const exportRes = await chrome.scripting.executeScript({
+      target: { tabId: semTabId },
+      func: () => {
+        const spans = document.querySelectorAll('[data-ui-name="Button.Text"]');
+        for (const el of spans) {
+          if (el.textContent.trim() === '导出') {
+            (el.closest('button') || el.parentElement).click(); return true;
+          }
+        }
+        for (const btn of document.querySelectorAll('button')) {
+          if (btn.textContent.trim() === '导出') { btn.click(); return true; }
+        }
+        return false;
+      },
+    }).catch(() => [{ result: false }]);
+
+    if (!exportRes[0]?.result) {
+      notifyPopup({ type: 'log', msg: '  ✗ 未找到导出按钮，跳过', logType: 'err' });
+      continue;
+    }
+
+    // 等下拉菜单出现
+    await sleep(2000);
+
+    // 点击 Excel 选项
+    const xlsRes = await chrome.scripting.executeScript({
+      target: { tabId: semTabId },
+      func: () => {
+        // 找所有可见且文本严格为 Excel 的元素
+        const all = document.querySelectorAll('*');
+        for (const el of all) {
+          if (el.children.length === 0 &&
+              el.textContent.trim() === 'Excel' &&
+              el.offsetParent !== null) {
+            el.click(); return true;
+          }
+        }
+        return false;
+      },
+    }).catch(() => [{ result: false }]);
+
+    if (xlsRes[0]?.result) {
+      doneCount++;
+      notifyPopup({ type: 'log', msg: '  ✓ 已点击 Excel，文件下载中', logType: 'ok' });
+    } else {
+      notifyPopup({ type: 'log', msg: '  ✗ 未找到 Excel 选项（下拉未出现？）', logType: 'err' });
+    }
+
+    chrome.storage.local.set({ batchState: { running: true, domains, current: i + 1, done: doneCount, total: domains.length } });
+
+    if (i < domains.length - 1 && !batchStop) await sleep(4000);
+  }
+
+  notifyPopup({ type: 'done', doneCount, total: domains.length });
+  chrome.storage.local.set({ batchState: { running: false, domains, current: domains.length, done: doneCount, total: domains.length } });
+  batchRunning = false;
+  batchStop = false;
+}
+
+
 
 async function submitToUrl(url, config) {
   // 打开新 tab

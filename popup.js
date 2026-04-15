@@ -646,12 +646,11 @@ $('btn-google-search').addEventListener('click', async () => {
   $('btn-google-search').textContent = 'Google 搜索';
 });
 
-// 批量提取
+// 批量导出 — 委托给 background.js 执行，popup 关闭不中断
 $('btn-batch-extract').addEventListener('click', async () => {
   const domains = getDiscoverDomains();
   if (domains.length === 0) { logD('请先添加竞品域名', 'err'); return; }
 
-  // 找已打开的镜像站 tab
   const allTabs = await chrome.tabs.query({});
   const semTab = allTabs.find(t => t.url && (
     t.url.includes('semrush.com') || t.url.includes('3ue.co')
@@ -661,121 +660,35 @@ $('btn-batch-extract').addEventListener('click', async () => {
     return;
   }
 
-  discoverRunning = true;
-  discoverStop = false;
-  $('btn-batch-extract').disabled = true;
-  $('btn-batch-stop').disabled = false;
-
-  let doneCount = 0;
-
-  for (let i = 0; i < domains.length; i++) {
-    if (discoverStop) { logD('已停止', 'info'); break; }
-
-    const domain = domains[i];
-    const pct = Math.round((i / domains.length) * 100);
-    $('progress-discover').style.width = pct + '%';
-    $('discover-current').textContent = `[${i+1}/${domains.length}] 正在处理: ${domain}`;
-    logD(`[${i+1}/${domains.length}] ${domain}`, 'info');
-
-    // 导航到该域名的外链页
-    const backlinkUrl = `https://sem.3ue.co/analytics/backlinks/backlinks/?q=${encodeURIComponent(domain)}&searchType=domain`;
-    await chrome.tabs.update(semTab.id, { url: backlinkUrl });
-    await waitForTabLoad(semTab.id);
-    await sleep(3000);
-
-    // 点击 Follow 过滤
-    const followRes = await chrome.scripting.executeScript({
-      target: { tabId: semTab.id },
-      func: () => {
-        const all = document.querySelectorAll('button, [role="button"], span[class*="Button"], div[class*="Button"]');
-        for (const el of all) {
-          if (el.textContent.trim() === 'Follow') { el.click(); return true; }
-        }
-        return false;
-      },
-    });
-    if (followRes[0]?.result) {
-      logD('  ✓ 已点击 Follow 过滤', 'ok');
-      await sleep(1500);
-    } else {
-      logD('  ⚠ 未找到 Follow 按钮，直接导出', 'info');
-    }
-
-    // 等待导出按钮可点击（Follow 过滤后需要几秒刷新）
-    await sleep(4000);
-
-    // 点击导出按钮：精确匹配 data-ui-name="Button.Text" 且文本为"导出"
-    const exportRes = await chrome.scripting.executeScript({
-      target: { tabId: semTab.id },
-      func: () => {
-        // 优先用 data-ui-name 精确匹配
-        const spans = document.querySelectorAll('[data-ui-name="Button.Text"]');
-        for (const el of spans) {
-          if (el.textContent.trim() === '导出') {
-            // 点击其父级 button 元素
-            const btn = el.closest('button') || el.parentElement;
-            btn.click();
-            return true;
-          }
-        }
-        // 兜底：找所有 button，文本严格等于"导出"
-        for (const btn of document.querySelectorAll('button')) {
-          if (btn.textContent.trim() === '导出') { btn.click(); return true; }
-        }
-        return false;
-      },
-    });
-    if (!exportRes[0]?.result) {
-      logD('  ✗ 未找到导出按钮，跳过', 'err');
-      continue;
-    }
-    await sleep(1000);
-
-    // 点击下拉菜单中的 Excel 选项
-    const xlsRes = await chrome.scripting.executeScript({
-      target: { tabId: semTab.id },
-      func: () => {
-        // 找所有可见的菜单项/列表项
-        const candidates = document.querySelectorAll(
-          '[role="menuitem"], [role="option"], li, [data-ui-name="MenuItem"], button'
-        );
-        for (const el of candidates) {
-          if (el.textContent.trim() === 'Excel') { el.click(); return true; }
-        }
-        // 兜底：找含 Excel 文字的任意元素（排除已有的导出按钮）
-        const all = document.querySelectorAll('span, div, a');
-        for (const el of all) {
-          if (el.textContent.trim() === 'Excel' && el.offsetParent !== null) {
-            el.click(); return true;
-          }
-        }
-        return false;
-      },
-    });
-    if (xlsRes[0]?.result) {
-      doneCount++;
-      logD(`  ✓ 已触发 Excel 导出`, 'ok');
-    } else {
-      logD('  ✗ 未找到 Excel 选项', 'err');
-    }
-
-    // 等待下载开始再处理下一个
-    if (i < domains.length - 1 && !discoverStop) await sleep(4000);
+  const res = await chrome.runtime.sendMessage({ action: 'startBatchExport', domains, semTabId: semTab.id });
+  if (res.ok) {
+    $('btn-batch-extract').disabled = true;
+    $('btn-batch-stop').disabled = false;
+    logD(`已启动批量导出（${domains.length} 个域名）— 关闭此窗口不会中断`, 'info');
+  } else {
+    logD(`启动失败: ${res.error}`, 'err');
   }
-
-  $('progress-discover').style.width = '100%';
-  $('discover-current').textContent = `完成！已触发 ${doneCount}/${domains.length} 个域名导出`;
-  logD(`批量导出完成，${doneCount} 个域名已触发下载，文件保存在下载目录`, 'ok');
-
-  discoverRunning = false;
-  discoverStop = false;
-  $('btn-batch-extract').disabled = false;
-  $('btn-batch-stop').disabled = true;
 });
 
-$('btn-batch-stop').addEventListener('click', () => {
-  discoverStop = true;
+$('btn-batch-stop').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({ action: 'stopBatchExport' });
   logD('正在停止，等待当前域名完成...', 'info');
+});
+
+// 接收 background.js 推送的进度
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action !== 'batchProgress') return;
+  if (msg.type === 'log') {
+    logD(msg.msg, msg.logType);
+  } else if (msg.type === 'progress') {
+    $('progress-discover').style.width = msg.pct + '%';
+    $('discover-current').textContent = msg.current;
+  } else if (msg.type === 'done') {
+    $('progress-discover').style.width = '100%';
+    $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
+    $('btn-batch-extract').disabled = false;
+    $('btn-batch-stop').disabled = true;
+  }
 });
 
 // ── 初始化 ────────────────────────────────────────────────────────────────────
@@ -787,7 +700,7 @@ $('btn-batch-stop').addEventListener('click', () => {
   const stored = await new Promise(r => chrome.storage.local.get([
     'discoverDomains', 'discoverKeyword',
     'logExtract', 'logSubmit', 'logDiscover',
-    'statusBar', 'extractStats',
+    'statusBar', 'extractStats', 'batchState',
   ], r));
 
   // 恢复状态栏
@@ -813,5 +726,14 @@ $('btn-batch-stop').addEventListener('click', () => {
   if (stored.discoverDomains) {
     $('discover-domains').value = stored.discoverDomains;
     updateDomainCount();
+  }
+
+  // 恢复批量导出运行状态
+  const bs = stored.batchState;
+  if (bs?.running) {
+    $('btn-batch-extract').disabled = true;
+    $('btn-batch-stop').disabled = false;
+    $('discover-current').textContent = `后台运行中... [${bs.current}/${bs.total}] 已完成 ${bs.done} 个`;
+    $('progress-discover').style.width = Math.round((bs.current / bs.total) * 100) + '%';
   }
 })();
