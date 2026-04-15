@@ -243,6 +243,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('btn-one-click').disabled = false;
     $('btn-one-click').textContent = '一键开始';
     $('btn-batch-stop').disabled = true;
+    chrome.storage.local.remove('pendingAnalysis');
     const data = msg.analysisData || {};
     if (Object.keys(data).length >= 2) {
       setTimeout(() => runAutoAnalysis(data), 1500);
@@ -492,7 +493,7 @@ $('btn-export-analyze').addEventListener('click', () => {
   await loadConfigToForm();
 
   const stored = await new Promise(r => chrome.storage.local.get([
-    'discoverDomains', 'discoverKeyword', 'logDiscover', 'statusBar', 'batchState',
+    'discoverDomains', 'discoverKeyword', 'logDiscover', 'statusBar', 'batchState', 'pendingAnalysis',
   ], r));
 
   if (stored.statusBar) setStatus(stored.statusBar);
@@ -512,5 +513,13 @@ $('btn-export-analyze').addEventListener('click', () => {
     $('btn-batch-stop').disabled = false;
     $('discover-current').textContent = `后台运行中... [${bs.current}/${bs.total}] 已完成 ${bs.done} 个`;
     $('progress-discover').style.width = Math.round((bs.current / bs.total) * 100) + '%';
+  }
+
+  // 批量导出完成时 popup 未打开 → 打开后自动触发交叉分析
+  const pending = stored.pendingAnalysis;
+  if (pending && Object.keys(pending).length >= 2) {
+    chrome.storage.local.remove('pendingAnalysis');
+    logD(`检测到上次批量导出结果（${Object.keys(pending).length} 个竞品），自动开始交叉分析...`, 'info');
+    setTimeout(() => runAutoAnalysis(pending), 800);
   }
 })();

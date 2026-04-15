@@ -190,7 +190,10 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
   }
 
   notifyPopup({ type: 'done', doneCount, total: domains.length, analysisData });
-  chrome.storage.local.set({ batchState: { running: false, domains, current: domains.length, done: doneCount, total: domains.length } });
+  chrome.storage.local.set({
+    batchState: { running: false, domains, current: domains.length, done: doneCount, total: domains.length },
+    pendingAnalysis: analysisData,   // popup 关着时存起来，打开后自动触发
+  });
   batchRunning = false;
   batchStop = false;
 }
