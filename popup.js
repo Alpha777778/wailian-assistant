@@ -195,6 +195,12 @@ $('discover-keyword').addEventListener('input', () => {
   chrome.storage.local.set({ discoverKeyword: $('discover-keyword').value });
 });
 
+['opt-follow-only', 'opt-active-only'].forEach(id => {
+  $(id).addEventListener('change', () => {
+    chrome.storage.local.set({ [id]: $(id).checked });
+  });
+});
+
 // 注入到 Google 页面：提取前10有机结果域名
 function extractGoogleDomains() {
   const EXCLUDE = ['google.', 'youtube.com', 'facebook.com', 'twitter.com',
@@ -743,6 +749,7 @@ chrome.runtime.onMessage.addListener((msg) => {
   const stored = await new Promise(r => chrome.storage.local.get([
     'discoverDomains', 'discoverKeyword', 'logDiscover', 'logAiSubmit', 'statusBar',
     'batchState', 'pendingAnalysis', 'analyzeResults', 'analyzeFileNames', 'analyzeTotal', 'activeTab',
+    'opt-follow-only', 'opt-active-only',
   ], r));
 
   if (stored.statusBar) setStatus(stored.statusBar);
@@ -755,6 +762,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('discover-domains').value = stored.discoverDomains;
     updateDomainCount();
   }
+
+  // 恢复勾选状态（storage 里有值才覆盖 HTML 默认值）
+  if (stored['opt-follow-only'] !== undefined) $('opt-follow-only').checked = stored['opt-follow-only'];
+  if (stored['opt-active-only'] !== undefined) $('opt-active-only').checked = stored['opt-active-only'];
 
   // 恢复激活的标签页
   if (stored.activeTab) {
@@ -803,11 +814,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     logAI('AI 提交任务后台运行中，点击「停止任务」可中止', 'info');
   }
 
-  // 批量导出完成时 popup 未打开 → 打开后自动触发交叉分析
+  // 批量导出完成时 popup 未打开 → 打开后提示，不自动触发（避免用户困惑）
   const pending = stored.pendingAnalysis;
   if (pending && Object.keys(pending).length >= 2) {
-    chrome.storage.local.remove('pendingAnalysis');
-    logD(`检测到上次批量导出结果（${Object.keys(pending).length} 个竞品），自动开始交叉分析...`, 'info');
-    setTimeout(() => runAutoAnalysis(pending), 800);
+    logD(`检测到上次批量导出结果（${Object.keys(pending).length} 个竞品），可切换到「交叉分析」手动分析`, 'info');
   }
 })();
