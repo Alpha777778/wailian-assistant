@@ -234,15 +234,23 @@ async function startBatchExport(domains, semTabId, followOnly = true, activeOnly
     }).catch(() => [{ result: false }]);
 
     if (xlsRes[0]?.result) {
-      doneCount++;
-      notifyPopup({ type: 'log', msg: '  ✓ 已点击 Excel，文件下载中', logType: 'ok' });
+      notifyPopup({ type: 'log', msg: '  ✓ 已点击 Excel，等待下载完成...', logType: 'ok' });
+      const dlResult = await waitForXlsDownload(20000, 120000);
+      if (dlResult.ok) {
+        doneCount++;
+        notifyPopup({ type: 'log', msg: '  ✓ 下载完成', logType: 'ok' });
+      } else if (dlResult.reason === 'no_download_started') {
+        notifyPopup({ type: 'log', msg: '  ✗ 20s 内未检测到下载，跳过', logType: 'err' });
+      } else {
+        notifyPopup({ type: 'log', msg: `  ✗ 下载失败: ${dlResult.reason}`, logType: 'err' });
+      }
     } else {
       notifyPopup({ type: 'log', msg: '  ✗ 未找到 Excel 选项（下拉未出现？）', logType: 'err' });
     }
 
     chrome.storage.local.set({ batchState: { running: true, domains, current: i + 1, done: doneCount, total: domains.length } });
 
-    if (i < domains.length - 1 && !batchStop) await sleep(4000);
+    if (i < domains.length - 1 && !batchStop) await sleep(2000);
   }
 
   notifyPopup({ type: 'done', doneCount, total: domains.length, analysisData });
@@ -299,6 +307,54 @@ function waitForTabLoad(tabId, timeout = 30000) {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// 等待一个 xlsx/xls 下载启动并完成
+function waitForXlsDownload(startTimeout = 20000, completeTimeout = 120000) {
+  return new Promise(resolve => {
+    let downloadId = null;
+    let startTimer = null;
+    let completeTimer = null;
+
+    function cleanup() {
+      chrome.downloads.onCreated.removeListener(onCreated);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      if (startTimer)   clearTimeout(startTimer);
+      if (completeTimer) clearTimeout(completeTimer);
+    }
+
+    // 超过 startTimeout 还没开始下载 → 失败
+    startTimer = setTimeout(() => {
+      cleanup();
+      resolve({ ok: false, reason: 'no_download_started' });
+    }, startTimeout);
+
+    function onCreated(item) {
+      // 只关心 xlsx/xls 文件
+      const name = (item.filename || item.url || '').toLowerCase();
+      if (!name.includes('.xls')) return;
+      clearTimeout(startTimer);
+      downloadId = item.id;
+      completeTimer = setTimeout(() => {
+        cleanup();
+        resolve({ ok: false, reason: 'download_timeout' });
+      }, completeTimeout);
+    }
+
+    function onChanged(delta) {
+      if (delta.id !== downloadId) return;
+      if (delta.state?.current === 'complete') {
+        cleanup();
+        resolve({ ok: true });
+      } else if (delta.state?.current === 'interrupted') {
+        cleanup();
+        resolve({ ok: false, reason: 'interrupted' });
+      }
+    }
+
+    chrome.downloads.onCreated.addListener(onCreated);
+    chrome.downloads.onChanged.addListener(onChanged);
+  });
 }
 
 // ── 注入到博客页面的评论提交函数 ─────────────────────────────────────────────

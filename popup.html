@@ -231,12 +231,14 @@ body {
 <div class="panel active" id="panel-discover">
   <div class="section">
     <div class="section-title">输入关键词，一键完成全流程</div>
-    <div class="form-row" style="display:flex;gap:8px;align-items:center">
-      <input type="text" id="discover-keyword" placeholder="输入关键词，如 tattoo ai" style="flex:1">
-      <button class="btn btn-primary" id="btn-one-click" style="white-space:nowrap;min-width:76px">一键开始</button>
-      <button class="btn btn-danger" id="btn-batch-stop" disabled style="white-space:nowrap">停止</button>
+    <div class="form-row" style="display:flex;gap:8px;align-items:flex-start">
+      <textarea id="discover-keyword" rows="2" placeholder="每行一个关键词，如：&#10;tattoo ai&#10;tattoo design" style="flex:1;resize:none;font-size:12px;padding:7px 10px;border:1.5px solid #d1d5db;border-radius:7px;outline:none;font-family:inherit"></textarea>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn btn-primary" id="btn-one-click" style="white-space:nowrap;min-width:76px">一键开始</button>
+        <button class="btn btn-danger" id="btn-batch-stop" disabled style="white-space:nowrap">停止</button>
+      </div>
     </div>
-    <div class="hint">Google 搜索 → 批量导出外链 → 交叉分析 | 需先打开 sem.3ue.co 并登录</div>
+    <div class="hint">每行一个关键词，逐个搜索合并竞品 | 需先打开 sem.3ue.co 并登录</div>
   </div>
   <div class="section">
     <div class="section-title">竞品域名 <span style="color:#94a3b8;font-weight:400">（自动填入，也可手动编辑后直接开始）</span></div>

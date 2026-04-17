@@ -220,10 +220,11 @@ function extractGoogleDomains() {
 
 // ── 一键开始：Google搜索 → 批量导出 → 交叉分析 ──────────────────────────────
 $('btn-one-click').addEventListener('click', async () => {
-  const keyword = $('discover-keyword').value.trim();
+  const keywords = $('discover-keyword').value
+    .split('\n').map(s => s.trim()).filter(Boolean);
   const existingDomains = getDiscoverDomains();
 
-  if (!keyword && existingDomains.length === 0) {
+  if (keywords.length === 0 && existingDomains.length === 0) {
     logD('请输入关键词或手动填写竞品域名', 'err'); return;
   }
 
@@ -240,37 +241,45 @@ $('btn-one-click').addEventListener('click', async () => {
   $('btn-one-click').disabled = true;
   $('btn-batch-stop').disabled = false;
 
-  let domains = existingDomains;
+  const domainSet = new Set(existingDomains);
 
-  // Step 1: Google 搜索（有关键词时执行）
-  if (keyword) {
-    $('btn-one-click').textContent = '搜索中...';
-    logD(`正在搜索: ${keyword}`, 'info');
-    try {
-      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(keyword)}&num=20`;
-      const newTab = await chrome.tabs.create({ url: searchUrl, active: false });
-      await waitForTabLoad(newTab.id);
-      await sleep(2500);
-      const res = await chrome.scripting.executeScript({
-        target: { tabId: newTab.id },
-        func: extractGoogleDomains,
-      });
-      chrome.tabs.remove(newTab.id);
-      const found = res[0]?.result || [];
-      if (found.length > 0) {
-        domains = found;
-        $('discover-domains').value = domains.join('\n');
-        chrome.storage.local.set({ discoverDomains: domains.join('\n') });
-        updateDomainCount();
-        logD(`已提取 ${domains.length} 个竞品域名`, 'ok');
-      } else {
-        logD('未提取到域名（Google 验证码？），使用已有域名列表', 'info');
+  // Step 1: 逐个关键词 Google 搜索，合并去重
+  if (keywords.length > 0) {
+    for (let ki = 0; ki < keywords.length; ki++) {
+      const kw = keywords[ki];
+      $('btn-one-click').textContent = `搜索 ${ki+1}/${keywords.length}...`;
+      logD(`正在搜索 [${ki+1}/${keywords.length}]: ${kw}`, 'info');
+      try {
+        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(kw)}&num=20`;
+        const newTab = await chrome.tabs.create({ url: searchUrl, active: false });
+        await waitForTabLoad(newTab.id);
+        await sleep(2500);
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: newTab.id },
+          func: extractGoogleDomains,
+        });
+        chrome.tabs.remove(newTab.id);
+        const found = res[0]?.result || [];
+        found.forEach(d => domainSet.add(d));
+        logD(`「${kw}」提取到 ${found.length} 个域名`, found.length > 0 ? 'ok' : 'info');
+      } catch (e) {
+        logD(`搜索「${kw}」失败: ${e.message}`, 'err');
       }
-    } catch (e) {
-      logD(`搜索失败: ${e.message}，使用已有域名列表`, 'err');
+      if (ki < keywords.length - 1) await sleep(1500);
+    }
+
+    const domains = [...domainSet];
+    if (domains.length > 0) {
+      $('discover-domains').value = domains.join('\n');
+      chrome.storage.local.set({ discoverDomains: domains.join('\n') });
+      updateDomainCount();
+      logD(`合并后共 ${domains.length} 个竞品域名`, 'ok');
+    } else {
+      logD('未提取到域名（Google 验证码？），使用已有域名列表', 'info');
     }
   }
 
+  const domains = [...domainSet];
   if (domains.length === 0) {
     logD('没有可用的竞品域名', 'err');
     $('btn-one-click').disabled = false;
@@ -279,7 +288,7 @@ $('btn-one-click').addEventListener('click', async () => {
     return;
   }
 
-  // Step 2: 批量导出（background.js 执行，关闭 popup 不中断）
+  // Step 2: 批量导出
   $('btn-one-click').textContent = '导出中...';
   logD(`开始批量导出 ${domains.length} 个竞品...`, 'info');
   const followOnly = $('opt-follow-only').checked;
