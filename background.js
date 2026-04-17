@@ -1,5 +1,8 @@
 // background.js — 处理评论提交 + 批量导出（在独立 tab 中操作）
 
+// 防止 service worker 被 Chrome 挂起（每20s触发一次存储读取保持活跃）
+setInterval(() => chrome.storage.local.get('_keepalive'), 20000);
+
 let batchRunning = false;
 let batchStop = false;
 
@@ -210,6 +213,9 @@ async function startBatchExport(domains, semTabId, followOnly = true, activeOnly
     // 等下拉菜单出现（增加到 3s）
     await sleep(3000);
 
+    // 先启动下载监听，再点击 Excel（避免竞态：点击后下载可能立即触发 onCreated）
+    const dlPromise = waitForXlsDownload(25000, 60000);
+
     // 点击 Excel 选项
     const xlsRes = await chrome.scripting.executeScript({
       target: { tabId: semTabId },
@@ -235,17 +241,18 @@ async function startBatchExport(domains, semTabId, followOnly = true, activeOnly
 
     if (xlsRes[0]?.result) {
       notifyPopup({ type: 'log', msg: '  ✓ 已点击 Excel，等待下载完成...', logType: 'ok' });
-      const dlResult = await waitForXlsDownload(20000, 120000);
+      const dlResult = await dlPromise;
       if (dlResult.ok) {
         doneCount++;
         notifyPopup({ type: 'log', msg: '  ✓ 下载完成', logType: 'ok' });
       } else if (dlResult.reason === 'no_download_started') {
-        notifyPopup({ type: 'log', msg: '  ✗ 20s 内未检测到下载，跳过', logType: 'err' });
+        notifyPopup({ type: 'log', msg: '  ✗ 25s 内未检测到下载，跳过', logType: 'err' });
       } else {
         notifyPopup({ type: 'log', msg: `  ✗ 下载失败: ${dlResult.reason}`, logType: 'err' });
       }
     } else {
       notifyPopup({ type: 'log', msg: '  ✗ 未找到 Excel 选项（下拉未出现？）', logType: 'err' });
+      // dlPromise 会在 25s 后自动超时，无需处理
     }
 
     chrome.storage.local.set({ batchState: { running: true, domains, current: i + 1, done: doneCount, total: domains.length } });
