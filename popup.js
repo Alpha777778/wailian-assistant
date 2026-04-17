@@ -9,12 +9,13 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active');
     $('panel-' + tab.dataset.tab).classList.add('active');
+    chrome.storage.local.set({ activeTab: tab.dataset.tab });
   });
 });
 
 // ── 日志 ──────────────────────────────────────────────────────────────────────
 const LOG_MAX = 80;
-const LOG_STORE = { 'log-discover': 'logDiscover' };
+const LOG_STORE = { 'log-discover': 'logDiscover', 'log-ai-submit': 'logAiSubmit' };
 
 function log(boxId, msg, type = '') {
   const box = $(boxId);
@@ -82,25 +83,95 @@ function waitForTabLoad(tabId, timeout = 15000) {
   });
 }
 
+// ── 全局停止 ──────────────────────────────────────────────────────────────────
+function setGlobalStop(visible) {
+  $('btn-global-stop').style.display = visible ? '' : 'none';
+}
+
+$('btn-global-stop').addEventListener('click', async () => {
+  chrome.runtime.sendMessage({ action: 'stopBatchExport' });
+  chrome.runtime.sendMessage({ action: 'stopAiSubmit' });
+  setGlobalStop(false);
+  setStatus('正在停止所有任务...');
+  // 恢复各面板按钮状态
+  $('btn-one-click').disabled = false;
+  $('btn-one-click').textContent = '一键开始';
+  $('btn-batch-stop').disabled = true;
+  $('btn-ai-submit').disabled = false;
+  $('btn-ai-stop').disabled = true;
+});
+
 // ── 配置面板 ──────────────────────────────────────────────────────────────────
 $('btn-save-config').addEventListener('click', async () => {
   const cfg = {
-    mirror: $('cfg-mirror').value.trim() || 'sem.3ue.co',
-    author: $('cfg-author').value.trim(),
-    email:  $('cfg-email').value.trim(),
-    site:   $('cfg-site').value.trim(),
+    mirror:  $('cfg-mirror').value.trim() || 'sem.3ue.co',
+    author:  $('cfg-author').value.trim(),
+    aiUrl:   $('cfg-ai-url').value.trim(),
+    aiKey:   $('cfg-ai-key').value.trim(),
+    aiModel: $('cfg-ai-model').value.trim(),
   };
+  const old = await getConfig();
+  if (old.brief)     cfg.brief     = old.brief;
+  if (old.briefName) cfg.briefName = old.briefName;
   await saveConfig(cfg);
   setStatus('✓ 配置已保存');
 });
 
+$('btn-test-ai').addEventListener('click', async () => {
+  const url   = $('cfg-ai-url').value.trim();
+  const key   = $('cfg-ai-key').value.trim();
+  const model = $('cfg-ai-model').value.trim();
+  const result = $('ai-test-result');
+
+  if (!url || !key || !model) {
+    result.style.color = '#ef4444';
+    result.textContent = '请先填写 URL / 密钥 / 模型';
+    return;
+  }
+
+  $('btn-test-ai').disabled = true;
+  result.style.color = '#6b7280';
+  result.textContent = '测试中...';
+
+  chrome.runtime.sendMessage(
+    { action: 'testAiConfig', url, key, model },
+    (resp) => {
+      $('btn-test-ai').disabled = false;
+      if (resp && resp.ok) {
+        result.style.color = '#059669';
+        result.textContent = `✓ 成功 · 回复: ${resp.reply}`;
+      } else {
+        result.style.color = '#ef4444';
+        result.textContent = `✗ ${resp?.error || '无响应'}`;
+      }
+    }
+  );
+});
+
 async function loadConfigToForm() {
   const cfg = await getConfig();
-  if (cfg.mirror) $('cfg-mirror').value = cfg.mirror;
-  if (cfg.author) $('cfg-author').value = cfg.author;
-  if (cfg.email)  $('cfg-email').value  = cfg.email;
-  if (cfg.site)   $('cfg-site').value   = cfg.site;
+  if (cfg.mirror)  $('cfg-mirror').value   = cfg.mirror;
+  if (cfg.author)  $('cfg-author').value   = cfg.author;
+  if (cfg.aiUrl)   $('cfg-ai-url').value   = cfg.aiUrl;
+  if (cfg.aiKey)   $('cfg-ai-key').value   = cfg.aiKey;
+  if (cfg.aiModel) $('cfg-ai-model').value = cfg.aiModel;
+  if (cfg.brief)   $('brief-filename').textContent = cfg.briefName || '已上传';
 }
+
+// ── 网站资料 txt 上传 ──────────────────────────────────────────────────────────
+$('btn-upload-brief').addEventListener('click', () => $('file-brief').click());
+$('file-brief').addEventListener('change', async () => {
+  const file = $('file-brief').files[0];
+  if (!file) return;
+  const text = await file.text();
+  const cfg = await getConfig();
+  cfg.brief = text.slice(0, 4000); // 最多存 4000 字
+  cfg.briefName = file.name;
+  await saveConfig(cfg);
+  $('brief-filename').textContent = file.name;
+  $('file-brief').value = '';
+  setStatus('✓ 网站资料已上传');
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 竞品发现面板
@@ -237,12 +308,14 @@ chrome.runtime.onMessage.addListener((msg) => {
   } else if (msg.type === 'progress') {
     $('progress-discover').style.width = msg.pct + '%';
     $('discover-current').textContent = msg.current;
+    setGlobalStop(true);
   } else if (msg.type === 'done') {
     $('progress-discover').style.width = '100%';
     $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
     $('btn-one-click').disabled = false;
     $('btn-one-click').textContent = '一键开始';
     $('btn-batch-stop').disabled = true;
+    setGlobalStop(false);
     chrome.storage.local.remove('pendingAnalysis');
     const data = msg.analysisData || {};
     if (Object.keys(data).length >= 2) {
@@ -259,6 +332,20 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 let loadedFiles = []; // [{name, rows}]
 let analyzeResults = [];
+let analyzeTotal = 0; // 本次分析的文件/竞品总数（用于显示和导出）
+
+// 持久化分析结果（rows 太大不存，只存结果和文件名）
+function saveAnalyzeState() {
+  chrome.storage.local.set({
+    analyzeResults,
+    analyzeTotal,
+    analyzeFileNames: loadedFiles.map(f => f.name),
+  });
+}
+
+function clearAnalyzeState() {
+  chrome.storage.local.remove(['analyzeResults', 'analyzeFileNames']);
+}
 
 // 拖拽区域
 const dropZone = $('drop-zone');
@@ -372,8 +459,54 @@ function extractRootDomain(val) {
   } catch { return null; }
 }
 
-$('btn-run-analyze').addEventListener('click', () => {
+// 垃圾域名过滤：搜索引擎、短链、域名工具、邮件子域等
+const SPAM_DOMAINS = new Set([
+  // 搜索引擎
+  'google.com','google.co.jp','google.co.uk','google.com.au','google.de','google.fr',
+  'bing.com','yahoo.com','yandex.com','yandex.ru','baidu.com','duckduckgo.com','ask.com',
+  // 社交/大平台（不提供外链价值）
+  'facebook.com','twitter.com','x.com','instagram.com','tiktok.com','youtube.com',
+  'linkedin.com','pinterest.com','reddit.com','tumblr.com','snapchat.com',
+  'whatsapp.com','telegram.org','discord.com','twitch.tv',
+  // 短链
+  'bit.ly','cutt.ly','t.co','tinyurl.com','ow.ly','buff.ly','goo.gl','rb.gy',
+  'short.io','linktr.ee','lnkd.in','amzn.to','youtu.be',
+  // 域名/SEO工具
+  'getwebsiteworth.com','domainwork.space','domainanalysis.org','similarweb.com',
+  'semrush.com','ahrefs.com','moz.com','majestic.com','alexa.com',
+  'whois.com','who.is','domaintools.com','namecheap.com','godaddy.com',
+  'siteadvisor.com','urlvoid.com','virustotal.com','web.archive.org',
+  // 电商/应用商店
+  'amazon.com','ebay.com','etsy.com','shopify.com',
+  'apps.apple.com','play.google.com','microsoft.com',
+  // 其他噪音
+  'wikipedia.org','wikimedia.org','archive.org','w3.org',
+  'cloudflare.com','wordpress.com','blogger.com','medium.com',
+]);
+
+// 垃圾子域前缀
+const SPAM_SUBDOMAINS = ['mail.','smtp.','pop.','imap.','ftp.','ns1.','ns2.','cpanel.','webmail.'];
+
+// 垃圾 TLD 或域名特征
+function isSpamDomain(domain) {
+  if (!domain || !domain.includes('.')) return true;
+  if (SPAM_DOMAINS.has(domain)) return true;
+  // 搜索引擎子域（search.yahoo.com, news.yahoo.com 等）
+  if (domain.endsWith('.yahoo.com') || domain.endsWith('.google.com') ||
+      domain.endsWith('.bing.com')  || domain.endsWith('.baidu.com')) return true;
+  // 邮件/系统子域
+  if (SPAM_SUBDOMAINS.some(p => domain.startsWith(p))) return true;
+  // IP 地址
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(domain)) return true;
+  return false;
+}
+
+$('btn-run-analyze').addEventListener('click', async () => {
   if (loadedFiles.length < 2) return;
+
+  $('btn-run-analyze').disabled = true;
+  $('analyze-hint').textContent = '分析中，请稍候...';
+  await new Promise(r => setTimeout(r, 10)); // 让 UI 先刷新
 
   // 对每个文件，找出现最多的域名（竞品自身域名），排除它
   const domainFileSets = {}; // domain -> Set of file names
@@ -417,14 +550,17 @@ $('btn-run-analyze').addEventListener('click', () => {
     }
   }
 
-  // 排序：只显示出现在 2+ 文件的
+  // 排序：只显示出现在 2+ 文件的，过滤垃圾域名
   analyzeResults = Object.entries(domainFileSets)
     .map(([domain, fileSet]) => ({ domain, count: fileSet.size, files: [...fileSet] }))
-    .filter(d => d.count >= 2)
+    .filter(d => d.count >= 2 && !isSpamDomain(d.domain))
     .sort((a, b) => b.count - a.count);
 
+  analyzeTotal = loadedFiles.length;
   renderAnalyzeResults();
+  saveAnalyzeState();
   $('btn-export-analyze').disabled = analyzeResults.length === 0;
+  $('btn-run-analyze').disabled = false;
   $('analyze-hint').textContent = `分析完成：${analyzeResults.length} 个域名出现在 2+ 个文件中`;
 });
 
@@ -434,6 +570,7 @@ function runAutoAnalysis(data) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.querySelector('[data-tab="analyze"]').classList.add('active');
   $('panel-analyze').classList.add('active');
+  chrome.storage.local.set({ activeTab: 'analyze' });
 
   const competitors = Object.keys(data);
   const domainFileSets = {};
@@ -447,13 +584,19 @@ function runAutoAnalysis(data) {
 
   analyzeResults = Object.entries(domainFileSets)
     .map(([domain, fileSet]) => ({ domain, count: fileSet.size, files: [...fileSet] }))
-    .filter(d => d.count >= 2)
+    .filter(d => d.count >= 2 && !isSpamDomain(d.domain))
     .sort((a, b) => b.count - a.count);
 
-  // 让手动导出按钮可用（用竞品名作为虚拟文件名）
-  loadedFiles = competitors.map(name => ({ name, rows: [] }));
+  analyzeTotal = competitors.length;
+
+  // 只有在没有手动加载文件时才用竞品名填充 loadedFiles（供导出用）
+  if (loadedFiles.length === 0) {
+    loadedFiles = competitors.map(name => ({ name, rows: [] }));
+    renderFileChips();
+  }
 
   renderAnalyzeResults();
+  saveAnalyzeState();
   $('btn-export-analyze').disabled = analyzeResults.length === 0;
   $('analyze-hint').textContent =
     `自动分析完成：${analyzeResults.length} 个域名出现在 2+ 个竞品中（共 ${competitors.length} 个竞品）`;
@@ -463,10 +606,13 @@ function renderAnalyzeResults() {
   const container = $('result-scroll');
   if (analyzeResults.length === 0) {
     container.innerHTML = '<div class="empty">没有找到在多个文件中重复出现的域名<br>请确认文件包含外链来源 URL</div>';
+    $('section-ai-submit').style.display = 'none';
     return;
   }
 
-  const total = loadedFiles.length;
+  $('section-ai-submit').style.display = 'block';
+
+  const total = analyzeTotal || loadedFiles.length;
   let html = `<table class="result-table">
     <thead><tr>
       <th>#</th>
@@ -489,7 +635,7 @@ function renderAnalyzeResults() {
 
 $('btn-export-analyze').addEventListener('click', () => {
   if (!analyzeResults.length) return;
-  const total = loadedFiles.length;
+  const total = analyzeTotal || loadedFiles.length;
   const csv = '\uFEFF' + ['域名,出现文件数,总文件数,文件列表',
     ...analyzeResults.map(r =>
       `"${r.domain}",${r.count},${total},"${r.files.join(' | ')}"`
@@ -505,31 +651,118 @@ $('btn-export-analyze').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
+// ── AI 自动提交 ────────────────────────────────────────────────────────────────
+
+const logAI = (m, t) => log('log-ai-submit', m, t);
+
+$('btn-ai-submit').addEventListener('click', async () => {
+  if (!analyzeResults.length) { logAI('没有交叉验证结果', 'err'); return; }
+
+  const cfg = await getConfig();
+  if (!cfg.aiUrl || !cfg.aiKey || !cfg.aiModel) {
+    logAI('请先在「配置」标签填写 AI 中转站信息', 'err'); return;
+  }
+  if (!cfg.brief) {
+    logAI('请先在「配置」标签上传网站资料 txt', 'err'); return;
+  }
+
+  const domains = analyzeResults.map(r => r.domain);
+  $('btn-ai-submit').disabled = true;
+  $('btn-ai-stop').disabled = false;
+  $('log-ai-submit').innerHTML = '';
+  logAI(`开始处理 ${domains.length} 个域名...`, 'info');
+
+  chrome.runtime.sendMessage({
+    action: 'aiAutoSubmit',
+    domains,
+    config: { author: cfg.author || '', brief: cfg.brief },
+    aiConfig: { url: cfg.aiUrl, key: cfg.aiKey, model: cfg.aiModel },
+  });
+});
+
+$('btn-ai-stop').addEventListener('click', () => {
+  chrome.runtime.sendMessage({ action: 'stopAiSubmit' });
+  logAI('正在停止...', 'info');
+});
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action !== 'aiSubmitProgress') return;
+  if (msg.type === 'log') {
+    logAI(msg.msg, msg.logType || '');
+    setGlobalStop(true);
+  } else if (msg.type === 'done') {
+    logAI(`完成！成功提交 ${msg.done}/${msg.total} 个`, 'ok');
+    $('btn-ai-submit').disabled = false;
+    $('btn-ai-stop').disabled = true;
+    setGlobalStop(false);
+  }
+});
+
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 (async () => {
   await loadConfigToForm();
 
   const stored = await new Promise(r => chrome.storage.local.get([
-    'discoverDomains', 'discoverKeyword', 'logDiscover', 'statusBar', 'batchState', 'pendingAnalysis',
+    'discoverDomains', 'discoverKeyword', 'logDiscover', 'logAiSubmit', 'statusBar',
+    'batchState', 'pendingAnalysis', 'analyzeResults', 'analyzeFileNames', 'analyzeTotal', 'activeTab',
   ], r));
 
   if (stored.statusBar) setStatus(stored.statusBar);
   else setStatus('就绪');
 
   if (stored.logDiscover?.length) restoreLog('log-discover', stored.logDiscover);
+  if (stored.logAiSubmit?.length)  restoreLog('log-ai-submit', stored.logAiSubmit);
   if (stored.discoverKeyword) $('discover-keyword').value = stored.discoverKeyword;
   if (stored.discoverDomains) {
     $('discover-domains').value = stored.discoverDomains;
     updateDomainCount();
   }
 
+  // 恢复激活的标签页
+  if (stored.activeTab) {
+    const activeTabEl = document.querySelector(`[data-tab="${stored.activeTab}"]`);
+    if (activeTabEl) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      activeTabEl.classList.add('active');
+      $('panel-' + stored.activeTab).classList.add('active');
+    }
+  }
+
+  // 恢复交叉分析结果
+  if (stored.analyzeResults?.length) {
+    analyzeResults = stored.analyzeResults;
+    analyzeTotal = stored.analyzeTotal || 0;
+    loadedFiles = (stored.analyzeFileNames || []).map(name => ({ name, rows: [] }));
+    renderFileChips();
+    renderAnalyzeResults();
+    $('btn-export-analyze').disabled = false;
+    $('btn-run-analyze').disabled = loadedFiles.length < 2;
+    $('analyze-hint').textContent = `已恢复上次分析结果：${analyzeResults.length} 个域名`;
+  }
+
+  // 查询后台任务运行状态
+  const [batchStatus, aiStatus] = await Promise.all([
+    new Promise(r => chrome.runtime.sendMessage({ action: 'getBatchStatus' }, resp => r(resp || {}))),
+    new Promise(r => chrome.runtime.sendMessage({ action: 'getAiStatus' },   resp => r(resp || {}))),
+  ]);
+
   const bs = stored.batchState;
-  if (bs?.running) {
+  if (batchStatus.running && bs) {
     $('btn-one-click').disabled = true;
     $('btn-one-click').textContent = '导出中...';
     $('btn-batch-stop').disabled = false;
     $('discover-current').textContent = `后台运行中... [${bs.current}/${bs.total}] 已完成 ${bs.done} 个`;
     $('progress-discover').style.width = Math.round((bs.current / bs.total) * 100) + '%';
+    setGlobalStop(true);
+  }
+
+  if (aiStatus.running) {
+    $('btn-ai-submit').disabled = true;
+    $('btn-ai-stop').disabled = false;
+    setGlobalStop(true);
+    // 切换到交叉分析 tab 让用户看到日志
+    logAI('AI 提交任务后台运行中，点击「停止任务」可中止', 'info');
   }
 
   // 批量导出完成时 popup 未打开 → 打开后自动触发交叉分析
