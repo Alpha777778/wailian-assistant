@@ -534,6 +534,10 @@ async function aiSubmitLoop(domains, config, aiConfig) {
   let skipped = 0;
   let failed = 0;
 
+  // 创建一个固定复用的标签页
+  const workerTab = await chrome.tabs.create({ url: 'about:blank', active: false });
+  notifyAiProgress({ type: 'log', msg: `开始处理 ${domains.length} 个域名（复用 tab #${workerTab.id}）`, logType: 'info' });
+
   for (let i = 0; i < domains.length; i++) {
     if (aiStop) {
       notifyAiProgress({ type: 'log', msg: '已停止', logType: 'info' });
@@ -547,16 +551,12 @@ async function aiSubmitLoop(domains, config, aiConfig) {
 
     notifyAiProgress({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain}`, logType: 'info' });
 
-    let tab;
     try {
-      tab = await chrome.tabs.create({ url, active: false });
       notifyAiProgress({ type: 'log', msg: `  → 加载页面...`, logType: 'info' });
-
-      const timedOut = await waitForTabLoad(tab.id, 30000);
+      await chrome.tabs.update(workerTab.id, { url });
+      const timedOut = await waitForTabLoad(workerTab.id, 30000);
       if (timedOut) {
         notifyAiProgress({ type: 'log', msg: `  ✗ 加载超时(30s)，跳过`, logType: 'err' });
-        chrome.tabs.remove(tab.id).catch(() => {});
-        tab = null;
         skipped++;
         continue;
       }
@@ -564,7 +564,7 @@ async function aiSubmitLoop(domains, config, aiConfig) {
 
       notifyAiProgress({ type: 'log', msg: `  → 提取表单HTML...`, logType: 'info' });
       const htmlRes = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: workerTab.id },
         func: () => new Promise(resolve => {
           window.scrollTo(0, document.body.scrollHeight);
           setTimeout(() => {
@@ -602,8 +602,6 @@ async function aiSubmitLoop(domains, config, aiConfig) {
 
       if (instructions.skip_reason) {
         notifyAiProgress({ type: 'log', msg: `  ⊘ 跳过: ${instructions.skip_reason}`, logType: 'info' });
-        chrome.tabs.remove(tab.id).catch(() => {});
-        tab = null;
         skipped++;
         continue;
       }
@@ -612,7 +610,7 @@ async function aiSubmitLoop(domains, config, aiConfig) {
       notifyAiProgress({ type: 'log', msg: `  → 表单类型: ${instructions.form_type}，${fieldCount} 个字段，填写提交...`, logType: 'info' });
 
       const fillRes = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: workerTab.id },
         func: fillFormFromInstructions,
         args: [instructions]
       });
@@ -620,7 +618,7 @@ async function aiSubmitLoop(domains, config, aiConfig) {
       const result = fillRes[0]?.result || { success: false, error: '脚本执行失败' };
       if (result.success) {
         done++;
-        notifyAiProgress({ type: 'log', msg: `  ✓ 提交成功 (${result.linkType}) — 身份: ${name} / ${email}`, logType: 'ok' });
+        notifyAiProgress({ type: 'log', msg: `  ✓ 提交成功 (${result.linkType}) — ${name} / ${email}`, logType: 'ok' });
       } else {
         failed++;
         notifyAiProgress({ type: 'log', msg: `  ✗ 填表失败: ${result.error}`, logType: 'err' });
@@ -631,10 +629,10 @@ async function aiSubmitLoop(domains, config, aiConfig) {
       notifyAiProgress({ type: 'log', msg: `  ✗ 错误: ${e.message}`, logType: 'err' });
     }
 
-    if (tab) chrome.tabs.remove(tab.id).catch(() => {});
-    if (i < domains.length - 1 && !aiStop) await sleep(3000);
+    if (i < domains.length - 1 && !aiStop) await sleep(2000);
   }
 
+  chrome.tabs.remove(workerTab.id).catch(() => {});
   notifyAiProgress({ type: 'done', done, total: domains.length,
     msg: `完成！成功 ${done} / 跳过 ${skipped} / 失败 ${failed}，共 ${domains.length} 个` });
   aiRunning = false;
