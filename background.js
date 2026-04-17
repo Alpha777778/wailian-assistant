@@ -548,12 +548,36 @@ async function aiSubmitLoop(domains, config, aiConfig) {
     try {
       tab = await chrome.tabs.create({ url, active: false });
       await waitForTabLoad(tab.id);
-      await sleep(2000);
+      await sleep(800);
 
-      // 获取页面 HTML
+      // 获取页面 HTML（滚到底部触发懒加载，专门提取表单和评论区）
       const htmlRes = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: () => document.documentElement.outerHTML.slice(0, 12000)
+        func: () => new Promise(resolve => {
+          window.scrollTo(0, document.body.scrollHeight);
+          setTimeout(() => {
+            const parts = [];
+
+            // 页面标题 + 描述（给 AI 判断主题用）
+            parts.push(`<title>${document.title}</title>`);
+            const desc = document.querySelector('meta[name="description"]');
+            if (desc) parts.push(desc.outerHTML);
+
+            // 所有 form（最关键）
+            for (const form of document.querySelectorAll('form')) {
+              parts.push(form.outerHTML.slice(0, 5000));
+            }
+
+            // 评论区容器（补充上下文）
+            for (const sel of ['#comments','#respond','.comments-area','.comment-section','.comment-form','[id*="comment"]','[class*="comment"]']) {
+              const el = document.querySelector(sel);
+              if (el) { parts.push(el.outerHTML.slice(0, 4000)); break; }
+            }
+
+            const combined = parts.join('\n\n');
+            resolve(combined.slice(0, 18000) || document.documentElement.outerHTML.slice(0, 12000));
+          }, 1800);
+        })
       });
       const html = htmlRes[0]?.result || '';
 
