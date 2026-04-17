@@ -344,6 +344,19 @@ function saveAnalyzeState() {
   });
 }
 
+$('btn-clear-files').addEventListener('click', () => {
+  loadedFiles = [];
+  analyzeResults = [];
+  analyzeTotal = 0;
+  renderFileChips();
+  updateAnalyzeHint();
+  $('btn-export-analyze').disabled = true;
+  $('result-scroll').innerHTML = '<div class="empty">分析结果将在此显示<br>域名出现在越多文件中，说明越值得发外链</div>';
+  $('section-ai-submit').style.display = 'none';
+  clearAnalyzeState();
+  setStatus('已清空');
+});
+
 function clearAnalyzeState() {
   chrome.storage.local.remove(['analyzeResults', 'analyzeFileNames']);
 }
