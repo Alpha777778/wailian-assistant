@@ -13,7 +13,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.action === 'startBatchExport') {
     if (batchRunning) { sendResponse({ ok: false, error: '已在运行中' }); return true; }
-    startBatchExport(msg.domains, msg.semTabId, msg.followOnly !== false, msg.mirror || 'sem.3ue.co').catch(console.error);
+    startBatchExport(msg.domains, msg.semTabId, msg.followOnly !== false, msg.activeOnly === true, msg.mirror || 'sem.3ue.co').catch(console.error);
     sendResponse({ ok: true });
     return true;
   }
@@ -28,6 +28,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ running: batchRunning });
     return;
   }
+
+  if (msg.action === 'getAiStatus') {
+    sendResponse({ running: aiRunning });
+    return;
+  }
+
+  if (msg.action === 'testAiConfig') {
+    callAI(
+      { url: msg.url, key: msg.key, model: msg.model },
+      '你是助手，简短回复。',
+      '回复"OK"两个字'
+    )
+      .then(reply => sendResponse({ ok: true, reply: reply.slice(0, 30) }))
+      .catch(e  => sendResponse({ ok: false, error: e.message.slice(0, 80) }));
+    return true;
+  }
+
+  if (msg.action === 'aiAutoSubmit') {
+    if (aiRunning) { sendResponse({ ok: false, error: '已在运行中' }); return true; }
+    aiSubmitLoop(msg.domains, msg.config, msg.aiConfig).catch(console.error);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'stopAiSubmit') {
+    aiStop = true;
+    sendResponse({ ok: true });
+    return;
+  }
 });
 
 // 向 popup 推送进度（popup 关着时静默忽略）
@@ -36,7 +65,7 @@ function notifyPopup(data) {
 }
 
 // ── 批量导出主循环 ─────────────────────────────────────────────────────────────
-async function startBatchExport(domains, semTabId, followOnly = true, mirror = 'sem.3ue.co') {
+async function startBatchExport(domains, semTabId, followOnly = true, activeOnly = false, mirror = 'sem.3ue.co') {
   batchRunning = true;
   batchStop = false;
   let doneCount = 0;
@@ -67,6 +96,34 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
     await waitForTabLoad(semTabId);
     await sleep(3000);
 
+    // 点击 Active 过滤（可选）
+    if (activeOnly) {
+      const activeRes = await chrome.scripting.executeScript({
+        target: { tabId: semTabId },
+        func: () => {
+          const spans = document.querySelectorAll('[data-ui-name="Button.Text"]');
+          for (const el of spans) {
+            const t = el.textContent.trim();
+            if (t === 'Active' || t === '活跃') {
+              (el.closest('button') || el.parentElement).click(); return true;
+            }
+          }
+          for (const btn of document.querySelectorAll('button')) {
+            const t = btn.textContent.trim();
+            if (t === 'Active' || t === '活跃') { btn.click(); return true; }
+          }
+          return false;
+        },
+      }).catch(() => [{ result: false }]);
+
+      if (activeRes[0]?.result) {
+        notifyPopup({ type: 'log', msg: '  ✓ 已点击 Active 过滤', logType: 'ok' });
+      } else {
+        notifyPopup({ type: 'log', msg: '  ⚠ 未找到 Active 按钮，跳过', logType: 'info' });
+      }
+      await sleep(3000);
+    }
+
     // 点击 Follow 过滤（可选）
     if (followOnly) {
       const followRes = await chrome.scripting.executeScript({
@@ -90,9 +147,8 @@ async function startBatchExport(domains, semTabId, followOnly = true, mirror = '
       } else {
         notifyPopup({ type: 'log', msg: '  ⚠ 未找到 Follow 按钮，直接导出', logType: 'info' });
       }
-      // 等待页面刷新后导出按钮可用
       await sleep(4500);
-    } else {
+    } else if (!activeOnly) {
       await sleep(1500);
     }
 
@@ -338,4 +394,213 @@ function submitCommentOnPage(config) {
       }
     }, 2000);
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AI 自动提交
+// ══════════════════════════════════════════════════════════════════════════════
+
+let aiRunning = false;
+let aiStop = false;
+
+const SYSTEM_ANALYZE = `你是外链提交专家。分析网页HTML片段，结合网站资料，返回JSON填表指令。
+返回纯JSON（不加markdown代码块）：
+{"form_type":"wp_comment|profile|forum|other","site_url":"从资料中选最合适的落地页URL","fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
+规则：
+- site_url：根据页面主题从资料的URL列表中选最匹配的落地页（AI工具目录选/generate，cover-up相关选对应内页，通用选首页）
+- url/website字段填site_url的值
+- author/name字段填提供的名字
+- email字段填提供的邮箱
+- comment/content字段：根据页面文章主题 + 网站资料，写100-150字自然英文评论，不放URL，符合资料中的AI写作指令
+- 检测到cleantalk/jetpack时skip_reason填原因
+- 隐藏字段（蜜罐）不填
+- 检测到antispam-bee时comment字段method用pressSequentially
+- 找不到评论表单时skip_reason填"无评论表单"
+- 严格遵守资料中的"禁止乱写的内容"和"AI写作指令"`;
+
+// 随机生成真实感英文名
+function randomName() {
+  const first = ['James','John','Robert','Michael','William','David','Richard','Joseph','Thomas','Charles','Emma','Olivia','Ava','Isabella','Sophia','Mia','Charlotte','Amelia','Harper','Evelyn'];
+  const last  = ['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Wilson','Taylor','Anderson','Thomas','Jackson','White','Harris','Martin','Thompson','Moore','Young','Allen'];
+  return first[Math.floor(Math.random()*first.length)] + ' ' + last[Math.floor(Math.random()*last.length)];
+}
+
+// 随机生成 Gmail plus-addressing 邮箱
+function randomEmail(name) {
+  const base = name.toLowerCase().replace(/\s+/, '.').replace(/[^a-z.]/g, '');
+  const num  = Math.floor(Math.random() * 9000) + 1000;
+  return `${base}+${num}@gmail.com`;
+}
+
+function notifyAiProgress(data) {
+  chrome.runtime.sendMessage({ action: 'aiSubmitProgress', ...data }).catch(() => {});
+}
+
+async function callAI(aiConfig, systemPrompt, userPrompt) {
+  const url = aiConfig.url.replace(/\/$/, '') + '/chat/completions';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${aiConfig.key}`
+    },
+    body: JSON.stringify({
+      model: aiConfig.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userPrompt }
+      ],
+      temperature: 0.2,
+      max_tokens: 800
+    })
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${body.slice(0, 120)}`);
+  }
+  const ct = resp.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    const body = await resp.text();
+    throw new Error(`返回非JSON（${ct || 'unknown'}）— URL 可能填错了。内容: ${body.slice(0, 80)}`);
+  }
+  const data = await resp.json();
+  return data.choices[0].message.content.trim();
+}
+
+// 注入到目标页面：根据 AI 指令填表并提交
+function fillFormFromInstructions(instructions) {
+  function simulateTyping(el, text) {
+    el.focus();
+    el.value = '';
+    for (const char of text) {
+      el.value += char;
+      el.dispatchEvent(new KeyboardEvent('keydown',  { bubbles: true, key: char }));
+      el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: char }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup',    { bubbles: true, key: char }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  try {
+    for (const field of (instructions.fields || [])) {
+      const el = document.querySelector(field.selector);
+      if (!el) continue;
+      if (field.method === 'pressSequentially') {
+        simulateTyping(el, field.value);
+      } else {
+        el.focus();
+        el.value = field.value;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+
+    const submitEl = document.querySelector(instructions.submit_selector || '[type=submit]');
+    if (submitEl) submitEl.click();
+
+    return new Promise(resolve => {
+      setTimeout(() => {
+        try {
+          const siteUrl = instructions.site_url || '';
+          if (siteUrl) {
+            const host = new URL(siteUrl).hostname;
+            const links = document.querySelectorAll(`a[href*="${host}"]`);
+            if (links.length > 0) {
+              const rel = links[0].rel?.toLowerCase() || '';
+              const linkType = (rel.includes('nofollow') || rel.includes('ugc')) ? 'nofollow' : 'dofollow';
+              resolve({ success: true, linkType });
+              return;
+            }
+          }
+          resolve({ success: true, linkType: 'pending' });
+        } catch (e) {
+          resolve({ success: true, linkType: 'pending' });
+        }
+      }, 3000);
+    });
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+async function aiSubmitLoop(domains, config, aiConfig) {
+  aiRunning = true;
+  aiStop = false;
+  let done = 0;
+
+  for (let i = 0; i < domains.length; i++) {
+    if (aiStop) {
+      notifyAiProgress({ type: 'log', msg: '已停止', logType: 'info' });
+      break;
+    }
+
+    const domain = domains[i];
+    const url = `https://${domain}`;
+
+    // 每个域名独立随机身份
+    const name  = config.author || randomName();
+    const email = randomEmail(name);
+
+    notifyAiProgress({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain} (${name} / ${email})`, logType: 'info' });
+
+    let tab;
+    try {
+      tab = await chrome.tabs.create({ url, active: false });
+      await waitForTabLoad(tab.id);
+      await sleep(2000);
+
+      // 获取页面 HTML
+      const htmlRes = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => document.documentElement.outerHTML.slice(0, 12000)
+      });
+      const html = htmlRes[0]?.result || '';
+
+      // 调用 AI 分析
+      const userPrompt = `评论者信息：名字=${name} 邮箱=${email}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html}`;
+      const raw = await callAI(aiConfig, SYSTEM_ANALYZE, userPrompt);
+
+      let instructions;
+      try {
+        instructions = JSON.parse(raw);
+      } catch {
+        const match = raw.match(/\{[\s\S]*\}/);
+        if (match) instructions = JSON.parse(match[0]);
+        else throw new Error('AI 返回格式错误');
+      }
+
+      if (instructions.skip_reason) {
+        notifyAiProgress({ type: 'log', msg: `  ⊘ 跳过: ${instructions.skip_reason}`, logType: 'info' });
+        chrome.tabs.remove(tab.id).catch(() => {});
+        tab = null;
+        continue;
+      }
+
+      // 执行填表
+      const fillRes = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: fillFormFromInstructions,
+        args: [instructions]
+      });
+
+      const result = fillRes[0]?.result || { success: false, error: '脚本执行失败' };
+      if (result.success) {
+        done++;
+        notifyAiProgress({ type: 'log', msg: `  ✓ 提交成功 (${result.linkType})`, logType: 'ok' });
+      } else {
+        notifyAiProgress({ type: 'log', msg: `  ✗ 失败: ${result.error}`, logType: 'err' });
+      }
+
+    } catch (e) {
+      notifyAiProgress({ type: 'log', msg: `  ✗ 错误: ${e.message}`, logType: 'err' });
+    }
+
+    if (tab) chrome.tabs.remove(tab.id).catch(() => {});
+    if (i < domains.length - 1 && !aiStop) await sleep(3000);
+  }
+
+  notifyAiProgress({ type: 'done', done, total: domains.length });
+  aiRunning = false;
+  aiStop = false;
 }

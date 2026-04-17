@@ -218,6 +218,7 @@ body {
   <img src="icon48.png" alt="">
   <h1>外链助手</h1>
   <span class="ver">v2.0</span>
+  <button class="btn btn-danger" id="btn-global-stop" style="display:none;font-size:11px;padding:5px 10px;margin-left:6px">⏹ 停止任务</button>
 </div>
 
 <div class="tabs">
@@ -242,9 +243,15 @@ body {
     <textarea id="discover-domains" rows="4" style="width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 9px;color:#1e293b;font-size:11px;font-family:monospace;resize:vertical;outline:none" placeholder="每行一个域名，例如：&#10;tattoo.ai&#10;inkbox.com&#10;tattoodo.com"></textarea>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
       <span style="font-size:10px;color:#94a3b8" id="discover-domain-count">0 个域名</span>
-      <div class="check-row">
-        <input type="checkbox" id="opt-follow-only" checked>
-        <label for="opt-follow-only" style="cursor:pointer;font-size:11px">只选 Follow 链接</label>
+      <div style="display:flex;gap:12px">
+        <div class="check-row">
+          <input type="checkbox" id="opt-active-only">
+          <label for="opt-active-only" style="cursor:pointer;font-size:11px">只选活跃</label>
+        </div>
+        <div class="check-row">
+          <input type="checkbox" id="opt-follow-only" checked>
+          <label for="opt-follow-only" style="cursor:pointer;font-size:11px">只选 Follow</label>
+        </div>
       </div>
     </div>
   </div>
@@ -276,6 +283,15 @@ body {
     </div>
     <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="analyze-hint">加载 2 个以上文件后开始分析</div>
   </div>
+  <div class="section" id="section-ai-submit" style="display:none">
+    <div class="section-title">AI 自动提交</div>
+    <div class="btn-row">
+      <button class="btn btn-success" id="btn-ai-submit">AI 分析并提交</button>
+      <button class="btn btn-danger" id="btn-ai-stop" disabled>停止</button>
+    </div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="ai-submit-hint">将逐个打开交叉验证域名，AI 分析表单并自动提交</div>
+    <div class="log-box" id="log-ai-submit" style="margin-top:8px;height:100px"></div>
+  </div>
   <div class="section" style="padding:0">
     <div class="result-scroll" id="result-scroll">
       <div class="empty">分析结果将在此显示<br>域名出现在越多文件中，说明越值得发外链</div>
@@ -293,20 +309,37 @@ body {
     </div>
   </div>
   <div class="section">
-    <div class="section-title">评论者信息（提交用）</div>
-    <div class="form-2">
-      <div class="form-row">
-        <label>名字</label>
-        <input type="text" id="cfg-author" placeholder="John Smith">
-      </div>
-      <div class="form-row">
-        <label>邮箱</label>
-        <input type="email" id="cfg-email" placeholder="john@gmail.com">
-      </div>
+    <div class="section-title">提交信息</div>
+    <div class="form-row">
+      <label>名字 <span style="color:#9ca3af;font-weight:400">（留空则 AI 随机生成）</span></label>
+      <input type="text" id="cfg-author" placeholder="John Smith（可留空）">
     </div>
     <div class="form-row">
-      <label>你的网站 URL</label>
-      <input type="url" id="cfg-site" placeholder="https://yoursite.com">
+      <label>网站资料 <span style="color:#9ca3af;font-weight:400">（上传 txt，AI 自动读取 URL 和内容）</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-gray" id="btn-upload-brief" style="white-space:nowrap;flex-shrink:0">上传 txt</button>
+        <span id="brief-filename" style="font-size:11px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">未上传</span>
+        <input type="file" id="file-brief" accept=".txt" style="display:none">
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-title">AI 自动填表</div>
+    <div class="form-row">
+      <label>中转站 API URL</label>
+      <input type="text" id="cfg-ai-url" placeholder="https://api.openai.com/v1">
+    </div>
+    <div class="form-row">
+      <label>API 密钥</label>
+      <input type="password" id="cfg-ai-key" placeholder="sk-...">
+    </div>
+    <div class="form-row">
+      <label>模型 <span style="color:#9ca3af;font-weight:400">（Claude: claude-sonnet-4-6 / GPT: gpt-4o）</span></label>
+      <input type="text" id="cfg-ai-model" placeholder="claude-sonnet-4-6">
+    </div>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn btn-gray" id="btn-test-ai">测试连接</button>
+      <div id="ai-test-result" style="font-size:11px;display:flex;align-items:center;padding-left:4px;color:#6b7280"></div>
     </div>
   </div>
   <div class="section">

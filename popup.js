@@ -283,8 +283,9 @@ $('btn-one-click').addEventListener('click', async () => {
   $('btn-one-click').textContent = '导出中...';
   logD(`开始批量导出 ${domains.length} 个竞品...`, 'info');
   const followOnly = $('opt-follow-only').checked;
+  const activeOnly = $('opt-active-only').checked;
   const res = await chrome.runtime.sendMessage({
-    action: 'startBatchExport', domains, semTabId: semTab.id, followOnly, mirror,
+    action: 'startBatchExport', domains, semTabId: semTab.id, followOnly, activeOnly, mirror,
   });
   if (!res.ok) {
     logD(`启动失败: ${res.error}`, 'err');
