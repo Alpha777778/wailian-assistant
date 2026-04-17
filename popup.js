@@ -96,6 +96,7 @@ $('btn-global-stop').addEventListener('click', async () => {
   // 恢复各面板按钮状态
   $('btn-one-click').disabled = false;
   $('btn-one-click').textContent = '一键开始';
+  $('btn-export-domains').disabled = false;
   $('btn-batch-stop').disabled = true;
   $('btn-ai-submit').disabled = false;
   $('btn-ai-stop').disabled = true;
@@ -316,6 +317,37 @@ $('btn-batch-stop').addEventListener('click', async () => {
   logD('正在停止，等待当前域名完成...', 'info');
 });
 
+$('btn-export-domains').addEventListener('click', async () => {
+  const domains = getDiscoverDomains();
+  if (domains.length === 0) {
+    logD('请先填写竞品域名', 'err'); return;
+  }
+  const cfg = await getConfig();
+  const mirror = cfg.mirror || 'sem.3ue.co';
+  const allTabs = await chrome.tabs.query({});
+  const semTab = allTabs.find(t => t.url && (
+    t.url.includes('semrush.com') || t.url.includes(mirror)
+  ));
+  if (!semTab) {
+    logD(`请先手动打开 ${mirror} 并登录，然后再点击`, 'err'); return;
+  }
+  const followOnly = $('opt-follow-only').checked;
+  const activeOnly = $('opt-active-only').checked;
+  $('btn-export-domains').disabled = true;
+  $('btn-one-click').disabled = true;
+  $('btn-batch-stop').disabled = false;
+  logD(`直接导出 ${domains.length} 个竞品域名...`, 'info');
+  const res = await chrome.runtime.sendMessage({
+    action: 'startBatchExport', domains, semTabId: semTab.id, followOnly, activeOnly, mirror,
+  });
+  if (!res.ok) {
+    logD(`启动失败: ${res.error}`, 'err');
+    $('btn-export-domains').disabled = false;
+    $('btn-one-click').disabled = false;
+    $('btn-batch-stop').disabled = true;
+  }
+});
+
 // 接收 background.js 推送的进度
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action !== 'batchProgress') return;
@@ -330,6 +362,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('discover-current').textContent = `完成！已触发 ${msg.doneCount}/${msg.total} 个域名导出`;
     $('btn-one-click').disabled = false;
     $('btn-one-click').textContent = '一键开始';
+    $('btn-export-domains').disabled = false;
     $('btn-batch-stop').disabled = true;
     setGlobalStop(false);
     chrome.storage.local.remove('pendingAnalysis');

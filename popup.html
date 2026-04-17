@@ -245,7 +245,7 @@ body {
     <textarea id="discover-domains" rows="4" style="width:100%;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 9px;color:#1e293b;font-size:11px;font-family:monospace;resize:vertical;outline:none" placeholder="每行一个域名，例如：&#10;tattoo.ai&#10;inkbox.com&#10;tattoodo.com"></textarea>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
       <span style="font-size:10px;color:#94a3b8" id="discover-domain-count">0 个域名</span>
-      <div style="display:flex;gap:12px">
+      <div style="display:flex;gap:12px;align-items:center">
         <div class="check-row">
           <input type="checkbox" id="opt-active-only" checked>
           <label for="opt-active-only" style="cursor:pointer;font-size:11px">只选活跃</label>
@@ -254,6 +254,7 @@ body {
           <input type="checkbox" id="opt-follow-only" checked>
           <label for="opt-follow-only" style="cursor:pointer;font-size:11px">只选 Follow</label>
         </div>
+        <button class="btn btn-success" id="btn-export-domains" style="font-size:11px;padding:5px 12px;white-space:nowrap">开始导出</button>
       </div>
     </div>
   </div>
