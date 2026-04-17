@@ -309,8 +309,8 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// 等待一个 xlsx/xls 下载启动并完成
-function waitForXlsDownload(startTimeout = 20000, completeTimeout = 120000) {
+// 等待下载启动并完成（不过滤文件名，初始 filename 可能为空）
+function waitForXlsDownload(startTimeout = 25000, completeTimeout = 120000) {
   return new Promise(resolve => {
     let downloadId = null;
     let startTimer = null;
@@ -319,20 +319,17 @@ function waitForXlsDownload(startTimeout = 20000, completeTimeout = 120000) {
     function cleanup() {
       chrome.downloads.onCreated.removeListener(onCreated);
       chrome.downloads.onChanged.removeListener(onChanged);
-      if (startTimer)   clearTimeout(startTimer);
+      if (startTimer)    clearTimeout(startTimer);
       if (completeTimer) clearTimeout(completeTimer);
     }
 
-    // 超过 startTimeout 还没开始下载 → 失败
     startTimer = setTimeout(() => {
       cleanup();
       resolve({ ok: false, reason: 'no_download_started' });
     }, startTimeout);
 
     function onCreated(item) {
-      // 只关心 xlsx/xls 文件
-      const name = (item.filename || item.url || '').toLowerCase();
-      if (!name.includes('.xls')) return;
+      // 接受任何新下载（filename 初始可能为空，不做文件名过滤）
       clearTimeout(startTimer);
       downloadId = item.id;
       completeTimer = setTimeout(() => {
