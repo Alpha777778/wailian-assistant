@@ -280,17 +280,20 @@ async function submitToUrl(url, config) {
   return result;
 }
 
-function waitForTabLoad(tabId) {
+function waitForTabLoad(tabId, timeout = 30000) {
   return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(true); // true = 超时
+    }, timeout);
     const listener = (id, info) => {
       if (id === tabId && info.status === 'complete') {
+        clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
+        resolve(false); // false = 正常加载
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
-    // 超时保护
-    setTimeout(resolve, 15000);
   });
 }
 
@@ -528,6 +531,8 @@ async function aiSubmitLoop(domains, config, aiConfig) {
   aiRunning = true;
   aiStop = false;
   let done = 0;
+  let skipped = 0;
+  let failed = 0;
 
   for (let i = 0; i < domains.length; i++) {
     if (aiStop) {
@@ -537,51 +542,52 @@ async function aiSubmitLoop(domains, config, aiConfig) {
 
     const domain = domains[i];
     const url = `https://${domain}`;
-
-    // 每个域名独立随机身份
     const name  = config.author || randomName();
     const email = randomEmail(name);
 
-    notifyAiProgress({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain} (${name} / ${email})`, logType: 'info' });
+    notifyAiProgress({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain}`, logType: 'info' });
 
     let tab;
     try {
       tab = await chrome.tabs.create({ url, active: false });
-      await waitForTabLoad(tab.id);
+      notifyAiProgress({ type: 'log', msg: `  → 加载页面...`, logType: 'info' });
+
+      const timedOut = await waitForTabLoad(tab.id, 30000);
+      if (timedOut) {
+        notifyAiProgress({ type: 'log', msg: `  ✗ 加载超时(30s)，跳过`, logType: 'err' });
+        chrome.tabs.remove(tab.id).catch(() => {});
+        tab = null;
+        skipped++;
+        continue;
+      }
       await sleep(800);
 
-      // 获取页面 HTML（滚到底部触发懒加载，专门提取表单和评论区）
+      notifyAiProgress({ type: 'log', msg: `  → 提取表单HTML...`, logType: 'info' });
       const htmlRes = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => new Promise(resolve => {
           window.scrollTo(0, document.body.scrollHeight);
           setTimeout(() => {
             const parts = [];
-
-            // 页面标题 + 描述（给 AI 判断主题用）
             parts.push(`<title>${document.title}</title>`);
             const desc = document.querySelector('meta[name="description"]');
             if (desc) parts.push(desc.outerHTML);
-
-            // 所有 form（最关键）
             for (const form of document.querySelectorAll('form')) {
               parts.push(form.outerHTML.slice(0, 5000));
             }
-
-            // 评论区容器（补充上下文）
             for (const sel of ['#comments','#respond','.comments-area','.comment-section','.comment-form','[id*="comment"]','[class*="comment"]']) {
               const el = document.querySelector(sel);
               if (el) { parts.push(el.outerHTML.slice(0, 4000)); break; }
             }
-
             const combined = parts.join('\n\n');
             resolve(combined.slice(0, 18000) || document.documentElement.outerHTML.slice(0, 12000));
           }, 1800);
         })
       });
       const html = htmlRes[0]?.result || '';
+      const formCount = (html.match(/<form/gi) || []).length;
+      notifyAiProgress({ type: 'log', msg: `  → 已提取 ${html.length} 字符，发现 ${formCount} 个表单，AI分析中...`, logType: 'info' });
 
-      // 调用 AI 分析
       const userPrompt = `评论者信息：名字=${name} 邮箱=${email}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html}`;
       const raw = await callAI(aiConfig, SYSTEM_ANALYZE, userPrompt);
 
@@ -598,10 +604,13 @@ async function aiSubmitLoop(domains, config, aiConfig) {
         notifyAiProgress({ type: 'log', msg: `  ⊘ 跳过: ${instructions.skip_reason}`, logType: 'info' });
         chrome.tabs.remove(tab.id).catch(() => {});
         tab = null;
+        skipped++;
         continue;
       }
 
-      // 执行填表
+      const fieldCount = instructions.fields?.length || 0;
+      notifyAiProgress({ type: 'log', msg: `  → 表单类型: ${instructions.form_type}，${fieldCount} 个字段，填写提交...`, logType: 'info' });
+
       const fillRes = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: fillFormFromInstructions,
@@ -611,12 +620,14 @@ async function aiSubmitLoop(domains, config, aiConfig) {
       const result = fillRes[0]?.result || { success: false, error: '脚本执行失败' };
       if (result.success) {
         done++;
-        notifyAiProgress({ type: 'log', msg: `  ✓ 提交成功 (${result.linkType})`, logType: 'ok' });
+        notifyAiProgress({ type: 'log', msg: `  ✓ 提交成功 (${result.linkType}) — 身份: ${name} / ${email}`, logType: 'ok' });
       } else {
-        notifyAiProgress({ type: 'log', msg: `  ✗ 失败: ${result.error}`, logType: 'err' });
+        failed++;
+        notifyAiProgress({ type: 'log', msg: `  ✗ 填表失败: ${result.error}`, logType: 'err' });
       }
 
     } catch (e) {
+      failed++;
       notifyAiProgress({ type: 'log', msg: `  ✗ 错误: ${e.message}`, logType: 'err' });
     }
 
@@ -624,7 +635,8 @@ async function aiSubmitLoop(domains, config, aiConfig) {
     if (i < domains.length - 1 && !aiStop) await sleep(3000);
   }
 
-  notifyAiProgress({ type: 'done', done, total: domains.length });
+  notifyAiProgress({ type: 'done', done, total: domains.length,
+    msg: `完成！成功 ${done} / 跳过 ${skipped} / 失败 ${failed}，共 ${domains.length} 个` });
   aiRunning = false;
   aiStop = false;
 }

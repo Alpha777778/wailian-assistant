@@ -70,13 +70,13 @@ function waitForTabLoad(tabId, timeout = 15000) {
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
+      resolve(true);
     }, timeout);
     function listener(id, info) {
       if (id === tabId && info.status === 'complete') {
         clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
+        resolve(false);
       }
     }
     chrome.tabs.onUpdated.addListener(listener);
@@ -686,13 +686,28 @@ $('btn-ai-stop').addEventListener('click', () => {
   logAI('正在停止...', 'info');
 });
 
+$('btn-export-ai-log').addEventListener('click', async () => {
+  const stored = await new Promise(r => chrome.storage.local.get('logAiSubmit', r));
+  const entries = stored.logAiSubmit || [];
+  if (!entries.length) { setStatus('没有日志可导出'); return; }
+  const text = entries.map(e => e.text).join('\n');
+  const blob = new Blob(['\uFEFF' + text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `AI提交日志_${new Date().toISOString().substring(0, 10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  setStatus(`✓ 已导出 ${entries.length} 条日志`);
+});
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action !== 'aiSubmitProgress') return;
   if (msg.type === 'log') {
     logAI(msg.msg, msg.logType || '');
     setGlobalStop(true);
   } else if (msg.type === 'done') {
-    logAI(`完成！成功提交 ${msg.done}/${msg.total} 个`, 'ok');
+    logAI(msg.msg || `完成！成功提交 ${msg.done}/${msg.total} 个`, 'ok');
     $('btn-ai-submit').disabled = false;
     $('btn-ai-stop').disabled = true;
     setGlobalStop(false);
