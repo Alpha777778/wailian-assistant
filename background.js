@@ -488,17 +488,17 @@ let aiStop = false;
 
 const SYSTEM_ANALYZE = `你是外链提交专家。分析网页HTML片段，结合网站资料，返回JSON填表指令。
 返回纯JSON（不加markdown代码块）：
-{"form_type":"wp_comment|profile|forum|other","site_url":"从资料中选最合适的落地页URL","fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
+{"form_type":"wp_comment|forum_reply|producthunt|directory|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
 规则：
-- site_url：根据页面主题从资料的URL列表中选最匹配的落地页（AI工具目录选/generate，cover-up相关选对应内页，通用选首页）
-- url/website字段填site_url的值
-- author/name字段填提供的名字
-- email字段填提供的邮箱
-- comment/content字段：根据页面文章主题 + 网站资料，写100-150字自然英文评论，不放URL，符合资料中的AI写作指令
-- 检测到cleantalk/jetpack时skip_reason填原因
-- 隐藏字段（蜜罐）不填
+- site_url：根据页面主题从资料的URL列表中选最匹配的落地页
+- url/website字段填site_url的值；author/name填提供的名字；email填提供的邮箱
+- comment/content字段：根据页面文章主题+网站资料，写100-150字自然英文评论，不放URL，符合资料中的AI写作指令
+- 检测到cleantalk/jetpack时skip_reason填原因；隐藏字段（蜜罐）不填
 - 检测到antispam-bee时comment字段method用pressSequentially
-- 找不到评论表单时skip_reason填"无评论表单"
+- 当前页是首页/列表页但有可发帖子页时：navigate_to填具体子页URL（如论坛帖子、产品讨论页），fields填空数组，skip_reason为null
+- Product Hunt：若在首页/产品列表，navigate_to填 https://www.producthunt.com/discussions 或某个具体帖子URL；若在帖子/产品页有评论框则直接填
+- 目录站/工具收录站（alternativeto/g2/capterra等）：找"Write a review"或"Add listing"表单
+- 找不到任何可填写表单且无法navigate_to时，skip_reason填"无可用表单"
 - 严格遵守资料中的"禁止乱写的内容"和"AI写作指令"`;
 
 // 随机生成真实感英文名
