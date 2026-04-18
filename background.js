@@ -858,6 +858,14 @@ async function csvSubmitLoop(domains, config, aiConfig) {
   csvRunning = true;
   csvStop = false;
 
+  // 过滤掉不应该提交外链的平台域名
+  const SKIP_DOMAINS = /^(producthunt\.com|twitter\.com|x\.com|facebook\.com|instagram\.com|linkedin\.com|youtube\.com|tiktok\.com|reddit\.com|pinterest\.com|snapchat\.com|whatsapp\.com|telegram\.org|discord\.com|github\.com|google\.|bing\.com|yahoo\.com|baidu\.com|amazon\.com|apple\.com|microsoft\.com|cloudflare\.com|wordpress\.com|shopify\.com|medium\.com|substack\.com|quora\.com|stackoverflow\.com)$/i;
+  const filtered = domains.filter(d => !SKIP_DOMAINS.test(d.replace(/^https?:\/\//, '').split('/')[0]));
+  if (filtered.length < domains.length) {
+    notifyCsv({ type: 'log', msg: `过滤掉 ${domains.length - filtered.length} 个平台域名，剩余 ${filtered.length} 个`, logType: 'info' });
+  }
+  domains = filtered;
+
   let workerTab;
   try {
     workerTab = await chrome.tabs.create({ url: 'about:blank', active: true });
@@ -1030,6 +1038,7 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       let stepNum = 0;
       const MAX_STEPS = 6;
 
+      let autoSkipped = false;
       while (stepInstr && !stepInstr.skip_reason && stepNum < MAX_STEPS) {
         stepNum++;
         // 净化 URL 双重协议
@@ -1053,6 +1062,26 @@ async function csvSubmitLoop(domains, config, aiConfig) {
           await sleep(waitMs);
           await waitForTabLoad(workerTab.id, 15000);
           await sleep(1500);
+          // 检测页面是否出现错误提示（如"already associated"、"already exists"等）
+          const errCheck = await chrome.scripting.executeScript({
+            target: { tabId: workerTab.id },
+            func: () => {
+              const body = document.body?.innerText || '';
+              const errPatterns = [
+                /already associated/i, /already exists/i, /already been submitted/i,
+                /already listed/i, /duplicate/i, /this url is already/i,
+                /product already/i, /reach out to us/i,
+              ];
+              for (const p of errPatterns) { if (p.test(body)) return body.slice(0, 200); }
+              return null;
+            },
+          }).catch(() => [{ result: null }]);
+          const errText = errCheck[0]?.result;
+          if (errText) {
+            notifyCsv({ type: 'log', msg: `  ⊘ 页面错误，自动跳过: ${errText.slice(0,80)}`, logType: 'info' });
+            autoSkipped = true;
+            break;
+          }
           // 重新提取页面并分析
           const hRes = await chrome.scripting.executeScript({
             target: { tabId: workerTab.id },
@@ -1083,6 +1112,7 @@ async function csvSubmitLoop(domains, config, aiConfig) {
         }
       }
 
+      if (autoSkipped) continue; // 页面报错，直接跳下一个域名
       await injectFloatingBtn(workerTab.id, '已填写表单，请手动提交后点击下一步 →', i+1, domains.length, true);
     } else {
       await injectFloatingBtn(workerTab.id, '未找到表单，点击跳过 →', i+1, domains.length, false);
