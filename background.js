@@ -486,19 +486,39 @@ function submitCommentOnPage(config) {
 let aiRunning = false;
 let aiStop = false;
 
-const SYSTEM_ANALYZE = `你是外链提交专家。分析网页HTML片段，结合网站资料，返回JSON填表指令。
+const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上提交/发布内容，为网站获取外链。分析网页HTML，结合网站资料，返回JSON操作指令。
 返回纯JSON（不加markdown代码块）：
-{"form_type":"wp_comment|forum_reply|producthunt|directory|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
-规则：
-- site_url：根据页面主题从资料的URL列表中选最匹配的落地页
-- url/website字段填site_url的值；author/name填提供的名字；email填提供的邮箱
-- comment/content字段：根据页面文章主题+网站资料，写100-150字自然英文评论，不放URL，符合资料中的AI写作指令
-- 检测到cleantalk/jetpack时skip_reason填原因；隐藏字段（蜜罐）不填
+{"form_type":"wp_comment|forum_reply|product_submit|directory_submit|review|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
+
+平台识别规则：
+【Product Hunt / 产品提交平台】
+- 目标：提交产品到 Product Hunt，获得产品页外链
+- navigate_to 填 https://www.producthunt.com/posts/new
+- 提交表单字段：产品名(#name)、标语(#tagline，60字以内英文)、描述(#description，200字以内)、网站URL(#website 填site_url)、话题标签
+- form_type: "product_submit"
+
+【目录站 / 工具收录站（alternativeto/g2/capterra/toolify等）】
+- 目标：提交产品收录，获得目录页外链
+- 找"Submit a tool"/"Add product"/"List your product"/"Submit"按钮
+- form_type: "directory_submit"
+
+【评测/评论平台（g2/capterra/trustpilot等）】
+- 目标：写产品评测，评测页会有网站链接
+- 找"Write a review"表单
+- form_type: "review"
+
+【博客/论坛评论】
+- 找评论框，填name/email/website/comment
+- website字段填site_url
+- comment写100-150字自然英文，不放URL
+- form_type: "wp_comment"或"forum_reply"
+
+通用规则：
+- site_url：从资料URL列表选最匹配的落地页
+- 当前页无表单但有可操作子页时：navigate_to填子页URL，fields填空数组
+- 检测到cleantalk/jetpack时skip_reason填原因；隐藏字段不填
 - 检测到antispam-bee时comment字段method用pressSequentially
-- 当前页是首页/列表页但有可发帖子页时：navigate_to填具体子页URL（如论坛帖子、产品讨论页），fields填空数组，skip_reason为null
-- Product Hunt：若在首页/产品列表，navigate_to填 https://www.producthunt.com/discussions 或某个具体帖子URL；若在帖子/产品页有评论框则直接填
-- 目录站/工具收录站（alternativeto/g2/capterra等）：找"Write a review"或"Add listing"表单
-- 找不到任何可填写表单且无法navigate_to时，skip_reason填"无可用表单"
+- 找不到任何可操作入口时，skip_reason填"无可用入口"
 - 严格遵守资料中的"禁止乱写的内容"和"AI写作指令"`;
 
 // 随机生成真实感英文名
