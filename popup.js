@@ -775,17 +775,38 @@ $('btn-ai-submit').addEventListener('click', async () => {
     logAI('请先在「配置」标签上传网站资料 txt', 'err'); return;
   }
 
+  // 过滤掉搜索引擎、社交媒体等无效域名
+  const SKIP_HOSTS = ['yahoo.com','google.','bing.com','baidu.com','facebook.com',
+    'twitter.com','instagram.com','youtube.com','linkedin.com','reddit.com',
+    'wikipedia.org','amazon.com','apple.com','microsoft.com'];
+  const filtered = domains.filter(d => !SKIP_HOSTS.some(h => d.includes(h)));
+  if (filtered.length < domains.length) {
+    logAI(`过滤掉 ${domains.length - filtered.length} 个无效域名，剩余 ${filtered.length} 个`, 'info');
+  }
+  if (!filtered.length) { logAI('过滤后没有可用域名', 'err'); return; }
+
   $('btn-ai-submit').disabled = true;
   $('btn-ai-stop').disabled = false;
   $('log-ai-submit').innerHTML = '';
-  logAI(`开始处理 ${domains.length} 个域名（AI填表，你手动提交，点悬浮按钮下一个）...`, 'info');
+  logAI(`准备处理 ${filtered.length} 个域名，正在启动...`, 'info');
 
-  chrome.runtime.sendMessage({
-    action: 'startCsvSubmit',
-    domains,
-    config: { author: cfg.author || '', brief: cfg.brief },
-    aiConfig: { url: cfg.aiUrl, key: cfg.aiKey, model: cfg.aiModel },
-  });
+  try {
+    const res = await chrome.runtime.sendMessage({
+      action: 'startCsvSubmit',
+      domains: filtered,
+      config: { author: cfg.author || '', brief: cfg.brief },
+      aiConfig: { url: cfg.aiUrl, key: cfg.aiKey, model: cfg.aiModel },
+    });
+    if (!res?.ok) {
+      logAI(`启动失败: ${res?.error || '后台未响应，请重新加载扩展'}`, 'err');
+      $('btn-ai-submit').disabled = false;
+      $('btn-ai-stop').disabled = true;
+    }
+  } catch (e) {
+    logAI(`发送失败: ${e.message}，请到 chrome://extensions 重新加载扩展`, 'err');
+    $('btn-ai-submit').disabled = false;
+    $('btn-ai-stop').disabled = true;
+  }
 });
 
 $('btn-ai-stop').addEventListener('click', () => {

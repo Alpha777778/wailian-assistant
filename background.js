@@ -767,7 +767,14 @@ async function csvSubmitLoop(domains, config, aiConfig) {
   csvRunning = true;
   csvStop = false;
 
-  const workerTab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  let workerTab;
+  try {
+    workerTab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  } catch (e) {
+    notifyCsv({ type: 'done', total: 0, msg: `✗ 无法创建标签页: ${e.message}` });
+    csvRunning = false;
+    return;
+  }
   notifyCsv({ type: 'log', msg: `开始处理 ${domains.length} 个域名，tab #${workerTab.id}`, logType: 'info' });
 
   for (let i = 0; i < domains.length; i++) {
