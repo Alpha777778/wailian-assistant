@@ -494,7 +494,8 @@ const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上�
 【Product Hunt / 产品提交平台】
 - 目标：提交产品到 Product Hunt，获得产品页外链
 - navigate_to 填 https://www.producthunt.com/posts/new
-- 提交表单字段：产品名(#name)、标语(#tagline，60字以内英文)、描述(#description，200字以内)、网站URL(#website 填site_url)、话题标签
+- 提交表单字段：产品名(input[name=name]或#name)、标语(input[name=tagline]或#tagline，60字以内英文)、描述(textarea[name=description]或#description，200字以内)、网站URL(input[name=website]或#website 填site_url)
+- 所有字段 method 用 pressSequentially（React受控组件）
 - form_type: "product_submit"
 
 【目录站 / 工具收录站（alternativeto/g2/capterra/toolify等）】
@@ -572,11 +573,24 @@ async function callAI(aiConfig, systemPrompt, userPrompt) {
 
 // 注入到目标页面：根据 AI 指令填表并提交
 function fillFormFromInstructions(instructions) {
+  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+  const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+
+  function setReactValue(el, text) {
+    el.focus();
+    const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+    if (setter) setter.call(el, text); else el.value = text;
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
   function simulateTyping(el, text) {
     el.focus();
-    el.value = '';
+    const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+    if (setter) setter.call(el, ''); else el.value = '';
     for (const char of text) {
-      el.value += char;
+      const cur = el.value;
+      if (setter) setter.call(el, cur + char); else el.value = cur + char;
       el.dispatchEvent(new KeyboardEvent('keydown',  { bubbles: true, key: char }));
       el.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: char }));
       el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -592,10 +606,7 @@ function fillFormFromInstructions(instructions) {
       if (field.method === 'pressSequentially') {
         simulateTyping(el, field.value);
       } else {
-        el.focus();
-        el.value = field.value;
-        el.dispatchEvent(new Event('input',  { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        setReactValue(el, field.value);
       }
     }
 
@@ -862,12 +873,56 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
       if (instructions?.skip_reason) {
         skipReason = instructions.skip_reason;
-        // 判断是否是登录问题
         needsLogin = /login|sign.?in|登录|注册|account/i.test(skipReason);
       }
     } catch (e) {
       notifyCsv({ type: 'log', msg: `  ✗ AI分析失败: ${e.message}`, logType: 'err' });
       skipReason = 'AI分析失败';
+    }
+
+    // 如果AI建议跳转子页（如Product Hunt提交页、论坛帖子等）
+    if (instructions?.navigate_to && !instructions.skip_reason) {
+      const subUrl = instructions.navigate_to;
+      notifyCsv({ type: 'log', msg: `  → 跳转子页: ${subUrl}`, logType: 'info' });
+      await chrome.tabs.update(workerTab.id, { url: subUrl, active: true });
+      const t2 = await waitForTabLoad(workerTab.id, 30000);
+      if (t2) {
+        notifyCsv({ type: 'log', msg: `  ✗ 子页加载超时`, logType: 'err' });
+        await injectFloatingBtn(workerTab.id, '子页加载超时，点击跳过 →', i+1, domains.length, false);
+        await waitForNext();
+        continue;
+      }
+      await sleep(2000);
+      // 重新提取子页HTML并分析
+      const h2Res = await chrome.scripting.executeScript({
+        target: { tabId: workerTab.id },
+        func: () => new Promise(resolve => {
+          window.scrollTo(0, document.body.scrollHeight);
+          setTimeout(() => {
+            const parts = [`<title>${document.title}</title>`];
+            for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 5000));
+            for (const sel of ['[class*="comment"]','[class*="reply"]','[class*="submit"]','[class*="form"]','textarea','input[type=text]']) {
+              const el = document.querySelector(sel);
+              if (el) { parts.push(el.closest('form,section,div')?.outerHTML?.slice(0,4000) || ''); break; }
+            }
+            resolve(parts.join('\n\n').slice(0, 16000));
+          }, 2000);
+        }),
+      }).catch(() => [{ result: '' }]);
+      const html2 = h2Res[0]?.result || '';
+      notifyCsv({ type: 'log', msg: `  → 子页AI分析中...`, logType: 'info' });
+      try {
+        const name2 = config.author || randomName();
+        const email2 = randomEmail(name2);
+        const raw2 = await callAI(aiConfig, SYSTEM_ANALYZE,
+          `评论者信息：名字=${name2} 邮箱=${email2}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html2}`);
+        try { instructions = JSON.parse(raw2); }
+        catch { const m = raw2.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
+        skipReason = instructions?.skip_reason || null;
+        needsLogin = skipReason ? /login|sign.?in|登录|注册|account/i.test(skipReason) : false;
+      } catch (e) {
+        skipReason = 'AI子页分析失败';
+      }
     }
 
     if (needsLogin) {
@@ -917,25 +972,43 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       await chrome.scripting.executeScript({
         target: { tabId: workerTab.id },
         func: (instr) => {
+          // React 受控组件需要用 nativeInputValueSetter 绕过合成事件
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+
+          function setReactValue(el, text) {
+            el.focus();
+            const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+            if (setter) {
+              setter.call(el, text);
+            } else {
+              el.value = text;
+            }
+            el.dispatchEvent(new Event('input',  { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+
           function simulateTyping(el, text) {
-            el.focus(); el.value = '';
+            el.focus();
+            const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+            if (setter) setter.call(el, '');
+            else el.value = '';
             for (const char of text) {
-              el.value += char;
-              el.dispatchEvent(new KeyboardEvent('keydown',  { bubbles: true, key: char }));
+              const cur = el.value;
+              if (setter) setter.call(el, cur + char);
+              else el.value = cur + char;
+              el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: char }));
               el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new KeyboardEvent('keyup',    { bubbles: true, key: char }));
+              el.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: char }));
             }
             el.dispatchEvent(new Event('change', { bubbles: true }));
           }
+
           for (const field of (instr.fields || [])) {
             const el = document.querySelector(field.selector);
             if (!el) continue;
             if (field.method === 'pressSequentially') simulateTyping(el, field.value);
-            else {
-              el.focus(); el.value = field.value;
-              el.dispatchEvent(new Event('input',  { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            }
+            else setReactValue(el, field.value);
           }
         },
         args: [instructions],
