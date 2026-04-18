@@ -794,6 +794,44 @@ function injectFloatingBtn(tabId, status, index, total, filled) {
   }).catch(() => {});
 }
 
+// 通用填表脚本（React nativeInputValueSetter 兼容）
+async function execFillScript(tabId, instr) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (instr) => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      function setReactValue(el, text) {
+        el.focus();
+        const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+        if (setter) setter.call(el, text); else el.value = text;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      function simulateTyping(el, text) {
+        el.focus();
+        const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+        if (setter) setter.call(el, ''); else el.value = '';
+        for (const char of text) {
+          const cur = el.value;
+          if (setter) setter.call(el, cur + char); else el.value = cur + char;
+          el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: char }));
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: char }));
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      for (const field of (instr.fields || [])) {
+        const el = document.querySelector(field.selector);
+        if (!el) continue;
+        if (field.method === 'pressSequentially') simulateTyping(el, field.value);
+        else setReactValue(el, field.value);
+      }
+    },
+    args: [instr],
+  }).catch(() => {});
+}
+
 async function csvSubmitLoop(domains, config, aiConfig) {
   csvRunning = true;
   csvStop = false;
@@ -966,53 +1004,64 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
     // 填表（不提交）
     if (instructions && !instructions.skip_reason) {
+      // 净化字段值（修复双重 https:// 等问题）
+      for (const f of (instructions.fields || [])) {
+        if (f.value) f.value = f.value.replace(/^(https?:\/\/){2,}/, 'https://');
+      }
+
       const fieldCount = instructions.fields?.length || 0;
       notifyCsv({ type: 'log', msg: `  ✓ 表单类型: ${instructions.form_type}，填写 ${fieldCount} 个字段`, logType: 'ok' });
 
-      await chrome.scripting.executeScript({
-        target: { tabId: workerTab.id },
-        func: (instr) => {
-          // React 受控组件需要用 nativeInputValueSetter 绕过合成事件
-          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-          const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      // Product Hunt 两步流程：第一步只有 URL 输入框，需自动点 Get started 进入完整表单
+      const isPHStep1 = instructions.form_type === 'product_submit' &&
+        /producthunt\.com\/posts\/new/i.test((await chrome.tabs.get(workerTab.id).catch(() => ({url:''}))).url) &&
+        fieldCount <= 2;
 
-          function setReactValue(el, text) {
-            el.focus();
-            const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
-            if (setter) {
-              setter.call(el, text);
-            } else {
-              el.value = text;
+      await execFillScript(workerTab.id, instructions);
+
+      if (isPHStep1) {
+        notifyCsv({ type: 'log', msg: `  → Product Hunt 第一步：自动点击 Get started...`, logType: 'info' });
+        await chrome.scripting.executeScript({
+          target: { tabId: workerTab.id },
+          func: () => {
+            const btn = document.querySelector('button[type=submit], button.get-started, form button');
+            if (btn) btn.click();
+          },
+        }).catch(() => {});
+        await sleep(3000);
+        await waitForTabLoad(workerTab.id, 15000);
+        await sleep(2000);
+        // 重新提取完整表单 HTML
+        const h3Res = await chrome.scripting.executeScript({
+          target: { tabId: workerTab.id },
+          func: () => {
+            const parts = [`<title>${document.title}</title>`];
+            for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 6000));
+            return parts.join('\n\n').slice(0, 16000);
+          },
+        }).catch(() => [{ result: '' }]);
+        const html3 = h3Res[0]?.result || '';
+        notifyCsv({ type: 'log', msg: `  → 分析完整表单...`, logType: 'info' });
+        try {
+          const name3 = config.author || randomName();
+          const email3 = randomEmail(name3);
+          const raw3 = await callAI(aiConfig, SYSTEM_ANALYZE,
+            `评论者信息：名字=${name3} 邮箱=${email3}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html3}`);
+          let instr3;
+          try { instr3 = JSON.parse(raw3); }
+          catch { const m = raw3.match(/\{[\s\S]*\}/); if (m) instr3 = JSON.parse(m[0]); }
+          if (instr3 && !instr3.skip_reason) {
+            for (const f of (instr3.fields || [])) {
+              if (f.value) f.value = f.value.replace(/^(https?:\/\/){2,}/, 'https://');
             }
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
+            notifyCsv({ type: 'log', msg: `  ✓ 填写完整表单 ${instr3.fields?.length || 0} 个字段`, logType: 'ok' });
+            await execFillScript(workerTab.id, instr3);
+            instructions = instr3;
           }
-
-          function simulateTyping(el, text) {
-            el.focus();
-            const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
-            if (setter) setter.call(el, '');
-            else el.value = '';
-            for (const char of text) {
-              const cur = el.value;
-              if (setter) setter.call(el, cur + char);
-              else el.value = cur + char;
-              el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: char }));
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: char }));
-            }
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-
-          for (const field of (instr.fields || [])) {
-            const el = document.querySelector(field.selector);
-            if (!el) continue;
-            if (field.method === 'pressSequentially') simulateTyping(el, field.value);
-            else setReactValue(el, field.value);
-          }
-        },
-        args: [instructions],
-      }).catch(() => {});
+        } catch (e) {
+          notifyCsv({ type: 'log', msg: `  ✗ 完整表单分析失败: ${e.message}`, logType: 'err' });
+        }
+      }
 
       await injectFloatingBtn(workerTab.id, '已填写表单，请手动提交后点击下一步 →', i+1, domains.length, true);
     } else {
