@@ -287,16 +287,23 @@ body {
     </div>
     <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="analyze-hint">加载 2 个以上文件后开始分析</div>
   </div>
-  <div class="section" id="section-ai-submit" style="display:none">
-    <div class="section-title">AI 自动提交</div>
+  <div class="section" id="section-ai-submit">
+    <div class="section-title">AI 辅助提交</div>
+    <div class="form-row" style="margin-bottom:8px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-gray" id="btn-import-csv" style="white-space:nowrap;flex-shrink:0">导入交叉分析 CSV</button>
+        <span id="csv-domain-count" style="font-size:11px;color:#6b7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">未导入（也可用下方分析结果）</span>
+        <input type="file" id="file-csv-import" accept=".csv" style="display:none">
+      </div>
+    </div>
     <div class="btn-row">
-      <button class="btn btn-success" id="btn-ai-submit">AI 分析并提交</button>
+      <button class="btn btn-success" id="btn-ai-submit">开始 AI 辅助</button>
       <button class="btn btn-danger" id="btn-ai-stop" disabled>停止</button>
     </div>
     <div style="margin-top:6px">
       <button class="btn btn-gray btn-block" id="btn-export-ai-log">导出日志 TXT</button>
     </div>
-    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="ai-submit-hint">将逐个打开交叉验证域名，AI 分析表单并自动提交</div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="ai-submit-hint">AI自动填表，你手动提交，点页面悬浮按钮进入下一个</div>
     <div class="log-box" id="log-ai-submit" style="margin-top:8px;height:100px"></div>
   </div>
   <div class="section" style="padding:0">

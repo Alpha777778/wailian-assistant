@@ -668,11 +668,8 @@ function renderAnalyzeResults() {
   const container = $('result-scroll');
   if (analyzeResults.length === 0) {
     container.innerHTML = '<div class="empty">没有找到在多个文件中重复出现的域名<br>请确认文件包含外链来源 URL</div>';
-    $('section-ai-submit').style.display = 'none';
     return;
   }
-
-  $('section-ai-submit').style.display = 'block';
 
   const total = analyzeTotal || loadedFiles.length;
   let html = `<table class="result-table">
@@ -713,12 +710,43 @@ $('btn-export-analyze').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-// ── AI 自动提交 ────────────────────────────────────────────────────────────────
+// ── AI 辅助提交 ────────────────────────────────────────────────────────────────
 
 const logAI = (m, t) => log('log-ai-submit', m, t);
 
+// CSV 导入的域名列表（优先级高于交叉分析结果）
+let csvImportedDomains = [];
+
+$('btn-import-csv').addEventListener('click', () => $('file-csv-import').click());
+
+$('file-csv-import').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const lines = ev.target.result.split('\n').map(l => l.trim()).filter(Boolean);
+    // 跳过表头（第一行含"域名"字样），提取第一列
+    const domains = lines
+      .filter(l => !l.startsWith('域名') && !l.startsWith('domain'))
+      .map(l => l.split(',')[0].trim().replace(/^"|"$/g, ''))
+      .filter(d => d && d.includes('.'));
+    csvImportedDomains = domains;
+    $('csv-domain-count').textContent = `已导入 ${domains.length} 个域名`;
+    logAI(`✓ 导入 CSV：${domains.length} 个域名`, 'ok');
+    e.target.value = '';
+  };
+  reader.readAsText(file, 'utf-8');
+});
+
 $('btn-ai-submit').addEventListener('click', async () => {
-  if (!analyzeResults.length) { logAI('没有交叉验证结果', 'err'); return; }
+  // 优先用 CSV 导入的域名，其次用交叉分析结果
+  const domains = csvImportedDomains.length
+    ? csvImportedDomains
+    : analyzeResults.map(r => r.domain);
+
+  if (!domains.length) {
+    logAI('请先导入交叉分析 CSV 或完成交叉分析', 'err'); return;
+  }
 
   const cfg = await getConfig();
   if (!cfg.aiUrl || !cfg.aiKey || !cfg.aiModel) {
@@ -728,14 +756,13 @@ $('btn-ai-submit').addEventListener('click', async () => {
     logAI('请先在「配置」标签上传网站资料 txt', 'err'); return;
   }
 
-  const domains = analyzeResults.map(r => r.domain);
   $('btn-ai-submit').disabled = true;
   $('btn-ai-stop').disabled = false;
   $('log-ai-submit').innerHTML = '';
-  logAI(`开始处理 ${domains.length} 个域名...`, 'info');
+  logAI(`开始处理 ${domains.length} 个域名（AI填表，你手动提交，点悬浮按钮下一个）...`, 'info');
 
   chrome.runtime.sendMessage({
-    action: 'aiAutoSubmit',
+    action: 'startCsvSubmit',
     domains,
     config: { author: cfg.author || '', brief: cfg.brief },
     aiConfig: { url: cfg.aiUrl, key: cfg.aiKey, model: cfg.aiModel },
@@ -743,7 +770,7 @@ $('btn-ai-submit').addEventListener('click', async () => {
 });
 
 $('btn-ai-stop').addEventListener('click', () => {
-  chrome.runtime.sendMessage({ action: 'stopAiSubmit' });
+  chrome.runtime.sendMessage({ action: 'stopCsvSubmit' });
   logAI('正在停止...', 'info');
 });
 
@@ -763,12 +790,12 @@ $('btn-export-ai-log').addEventListener('click', async () => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action !== 'aiSubmitProgress') return;
+  if (msg.action !== 'csvSubmitProgress') return;
   if (msg.type === 'log') {
     logAI(msg.msg, msg.logType || '');
     setGlobalStop(true);
   } else if (msg.type === 'done') {
-    logAI(msg.msg || `完成！成功提交 ${msg.done}/${msg.total} 个`, 'ok');
+    logAI(msg.msg || `完成！共处理 ${msg.total} 个`, 'ok');
     $('btn-ai-submit').disabled = false;
     $('btn-ai-stop').disabled = true;
     setGlobalStop(false);

@@ -60,6 +60,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+
+  if (msg.action === 'startCsvSubmit') {
+    if (csvRunning) { sendResponse({ ok: false, error: '已在运行中' }); return true; }
+    csvSubmitLoop(msg.domains, msg.config, msg.aiConfig).catch(console.error);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg.action === 'stopCsvSubmit') {
+    csvStop = true;
+    if (csvNextResolve) { csvNextResolve(); csvNextResolve = null; }
+    sendResponse({ ok: true });
+    return;
+  }
+
+  if (msg.action === 'csvNextDomain') {
+    if (csvNextResolve) { csvNextResolve(); csvNextResolve = null; }
+    sendResponse({ ok: true });
+    return;
+  }
 });
 
 // 向 popup 推送进度（popup 关着时静默忽略）
@@ -697,4 +717,218 @@ async function aiSubmitLoop(domains, config, aiConfig) {
     msg: `完成！成功 ${done} / 跳过 ${skipped} / 失败 ${failed}，共 ${domains.length} 个` });
   aiRunning = false;
   aiStop = false;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CSV 辅助提交（AI填表，用户手动提交，悬浮按钮控制节奏）
+// ══════════════════════════════════════════════════════════════════════════════
+
+let csvRunning = false;
+let csvStop = false;
+let csvNextResolve = null;
+
+function notifyCsv(data) {
+  chrome.runtime.sendMessage({ action: 'csvSubmitProgress', ...data }).catch(() => {});
+}
+
+// 注入悬浮按钮到页面
+function injectFloatingBtn(tabId, status, index, total, filled) {
+  return chrome.scripting.executeScript({
+    target: { tabId },
+    func: (status, index, total, filled) => {
+      document.getElementById('__wl_float_btn')?.remove();
+      const div = document.createElement('div');
+      div.id = '__wl_float_btn';
+      div.style.cssText = [
+        'position:fixed', 'bottom:24px', 'right:24px', 'z-index:2147483647',
+        'background:' + (filled ? '#059669' : '#4f46e5'),
+        'color:#fff', 'padding:12px 18px', 'border-radius:14px',
+        'cursor:pointer', 'font-size:13px', 'font-weight:700',
+        'box-shadow:0 4px 24px rgba(0,0,0,.25)',
+        'font-family:-apple-system,sans-serif',
+        'max-width:260px', 'line-height:1.5', 'user-select:none',
+      ].join(';');
+      div.innerHTML =
+        `<div style="font-size:10px;opacity:.7;margin-bottom:3px">[${index}/${total}] 外链助手</div>` +
+        `<div>${status}</div>` +
+        `<div style="font-size:11px;margin-top:4px;opacity:.8">点击 → 下一个域名</div>`;
+      div.onclick = () => {
+        div.style.background = '#374151';
+        div.innerHTML = '<div style="padding:4px 0">⏳ 跳转中...</div>';
+        chrome.runtime.sendMessage({ action: 'csvNextDomain' });
+      };
+      document.body.appendChild(div);
+    },
+    args: [status, index, total, filled],
+  }).catch(() => {});
+}
+
+async function csvSubmitLoop(domains, config, aiConfig) {
+  csvRunning = true;
+  csvStop = false;
+
+  const workerTab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  notifyCsv({ type: 'log', msg: `开始处理 ${domains.length} 个域名，tab #${workerTab.id}`, logType: 'info' });
+
+  for (let i = 0; i < domains.length; i++) {
+    if (csvStop) { notifyCsv({ type: 'log', msg: '已停止', logType: 'info' }); break; }
+
+    const domain = domains[i];
+    const url = /^https?:\/\//.test(domain) ? domain : `https://${domain}`;
+    notifyCsv({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain}`, logType: 'info' });
+
+    // 导航
+    try {
+      await chrome.tabs.update(workerTab.id, { url, active: true });
+    } catch (e) {
+      notifyCsv({ type: 'log', msg: `  ✗ 无法导航: ${e.message}`, logType: 'err' });
+      await injectFloatingBtn(workerTab.id, '导航失败，点击跳过', i+1, domains.length, false);
+      await waitForNext();
+      continue;
+    }
+
+    const timedOut = await waitForTabLoad(workerTab.id, 30000);
+    if (timedOut) {
+      notifyCsv({ type: 'log', msg: `  ✗ 加载超时(30s)`, logType: 'err' });
+      await injectFloatingBtn(workerTab.id, '页面加载超时，点击跳过', i+1, domains.length, false);
+      await waitForNext();
+      continue;
+    }
+    await sleep(1500);
+
+    // 提取页面 HTML
+    notifyCsv({ type: 'log', msg: `  → 提取页面内容...`, logType: 'info' });
+    const htmlRes = await chrome.scripting.executeScript({
+      target: { tabId: workerTab.id },
+      func: () => new Promise(resolve => {
+        window.scrollTo(0, document.body.scrollHeight);
+        setTimeout(() => {
+          const parts = [`<title>${document.title}</title>`];
+          const desc = document.querySelector('meta[name="description"]');
+          if (desc) parts.push(desc.outerHTML);
+          for (const form of document.querySelectorAll('form')) {
+            parts.push(form.outerHTML.slice(0, 5000));
+          }
+          for (const sel of ['#comments','#respond','.comments-area','.comment-section','[id*="comment"]','[class*="comment"]']) {
+            const el = document.querySelector(sel);
+            if (el) { parts.push(el.outerHTML.slice(0, 4000)); break; }
+          }
+          resolve(parts.join('\n\n').slice(0, 16000));
+        }, 1500);
+      }),
+    }).catch(() => [{ result: '' }]);
+    const html = htmlRes[0]?.result || '';
+
+    // AI 分析
+    notifyCsv({ type: 'log', msg: `  → AI 分析中...`, logType: 'info' });
+    let instructions = null;
+    let skipReason = null;
+    let needsLogin = false;
+
+    try {
+      const name  = config.author || randomName();
+      const email = randomEmail(name);
+      const userPrompt = `评论者信息：名字=${name} 邮箱=${email}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html}`;
+      const raw = await callAI(aiConfig, SYSTEM_ANALYZE, userPrompt);
+      try { instructions = JSON.parse(raw); }
+      catch { const m = raw.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
+
+      if (instructions?.skip_reason) {
+        skipReason = instructions.skip_reason;
+        // 判断是否是登录问题
+        needsLogin = /login|sign.?in|登录|注册|account/i.test(skipReason);
+      }
+    } catch (e) {
+      notifyCsv({ type: 'log', msg: `  ✗ AI分析失败: ${e.message}`, logType: 'err' });
+      skipReason = 'AI分析失败';
+    }
+
+    if (needsLogin) {
+      notifyCsv({ type: 'log', msg: `  ⚠ 需要登录，等待你操作...`, logType: 'info' });
+      await injectFloatingBtn(workerTab.id, '需要登录，请登录后点击继续 →', i+1, domains.length, false);
+      await waitForNext();
+      if (csvStop) break;
+      // 登录后重新分析
+      notifyCsv({ type: 'log', msg: `  → 登录后重新分析...`, logType: 'info' });
+      const html2Res = await chrome.scripting.executeScript({
+        target: { tabId: workerTab.id },
+        func: () => new Promise(resolve => {
+          window.scrollTo(0, document.body.scrollHeight);
+          setTimeout(() => {
+            const parts = [`<title>${document.title}</title>`];
+            for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 5000));
+            resolve(parts.join('\n\n').slice(0, 16000));
+          }, 1500);
+        }),
+      }).catch(() => [{ result: '' }]);
+      const html2 = html2Res[0]?.result || '';
+      try {
+        const name2  = config.author || randomName();
+        const email2 = randomEmail(name2);
+        const raw2 = await callAI(aiConfig, SYSTEM_ANALYZE,
+          `评论者信息：名字=${name2} 邮箱=${email2}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html2}`);
+        try { instructions = JSON.parse(raw2); }
+        catch { const m = raw2.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
+        skipReason = instructions?.skip_reason || null;
+      } catch (e) {
+        skipReason = 'AI重新分析失败';
+      }
+    }
+
+    if (skipReason && !needsLogin) {
+      notifyCsv({ type: 'log', msg: `  ⊘ 跳过: ${skipReason}`, logType: 'info' });
+      await injectFloatingBtn(workerTab.id, `跳过: ${skipReason}`, i+1, domains.length, false);
+      await waitForNext();
+      continue;
+    }
+
+    // 填表（不提交）
+    if (instructions && !instructions.skip_reason) {
+      const fieldCount = instructions.fields?.length || 0;
+      notifyCsv({ type: 'log', msg: `  ✓ 表单类型: ${instructions.form_type}，填写 ${fieldCount} 个字段`, logType: 'ok' });
+
+      await chrome.scripting.executeScript({
+        target: { tabId: workerTab.id },
+        func: (instr) => {
+          function simulateTyping(el, text) {
+            el.focus(); el.value = '';
+            for (const char of text) {
+              el.value += char;
+              el.dispatchEvent(new KeyboardEvent('keydown',  { bubbles: true, key: char }));
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new KeyboardEvent('keyup',    { bubbles: true, key: char }));
+            }
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          for (const field of (instr.fields || [])) {
+            const el = document.querySelector(field.selector);
+            if (!el) continue;
+            if (field.method === 'pressSequentially') simulateTyping(el, field.value);
+            else {
+              el.focus(); el.value = field.value;
+              el.dispatchEvent(new Event('input',  { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        },
+        args: [instructions],
+      }).catch(() => {});
+
+      await injectFloatingBtn(workerTab.id, '已填写表单，请手动提交后点击下一步 →', i+1, domains.length, true);
+    } else {
+      await injectFloatingBtn(workerTab.id, '未找到表单，点击跳过 →', i+1, domains.length, false);
+    }
+
+    // 等待用户点击悬浮按钮
+    await waitForNext();
+  }
+
+  chrome.tabs.remove(workerTab.id).catch(() => {});
+  notifyCsv({ type: 'done', total: domains.length, msg: `完成！共处理 ${domains.length} 个域名` });
+  csvRunning = false;
+  csvStop = false;
+}
+
+function waitForNext() {
+  return new Promise(resolve => { csvNextResolve = resolve; });
 }
