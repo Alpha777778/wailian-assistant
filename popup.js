@@ -717,26 +717,45 @@ const logAI = (m, t) => log('log-ai-submit', m, t);
 // CSV 导入的域名列表（优先级高于交叉分析结果）
 let csvImportedDomains = [];
 
-$('btn-import-csv').addEventListener('click', () => $('file-csv-import').click());
+function parseCsvDomains(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  return lines
+    .filter(l => !l.startsWith('域名') && !l.startsWith('domain'))
+    .map(l => l.split(',')[0].trim().replace(/^"|"$/g, ''))
+    .filter(d => d && d.includes('.'));
+}
 
-$('file-csv-import').addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+function loadCsvFile(file) {
   const reader = new FileReader();
   reader.onload = (ev) => {
-    const lines = ev.target.result.split('\n').map(l => l.trim()).filter(Boolean);
-    // 跳过表头（第一行含"域名"字样），提取第一列
-    const domains = lines
-      .filter(l => !l.startsWith('域名') && !l.startsWith('domain'))
-      .map(l => l.split(',')[0].trim().replace(/^"|"$/g, ''))
-      .filter(d => d && d.includes('.'));
+    const domains = parseCsvDomains(ev.target.result);
     csvImportedDomains = domains;
-    $('csv-domain-count').textContent = `已导入 ${domains.length} 个域名`;
+    $('csv-domain-count').textContent = `✓ 已导入 ${domains.length} 个域名`;
+    $('csv-drop-zone').classList.remove('drag-over');
     logAI(`✓ 导入 CSV：${domains.length} 个域名`, 'ok');
-    e.target.value = '';
   };
   reader.readAsText(file, 'utf-8');
+}
+
+// 点击选择文件
+$('csv-drop-zone').addEventListener('click', () => $('file-csv-import').click());
+$('file-csv-import').addEventListener('change', (e) => {
+  if (e.target.files[0]) { loadCsvFile(e.target.files[0]); e.target.value = ''; }
 });
+
+// 拖拽
+$('csv-drop-zone').addEventListener('dragover', (e) => {
+  e.preventDefault(); $('csv-drop-zone').classList.add('drag-over');
+});
+$('csv-drop-zone').addEventListener('dragleave', () => {
+  $('csv-drop-zone').classList.remove('drag-over');
+});
+$('csv-drop-zone').addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) loadCsvFile(file);
+});
+
 
 $('btn-ai-submit').addEventListener('click', async () => {
   // 优先用 CSV 导入的域名，其次用交叉分析结果
