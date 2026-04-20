@@ -659,6 +659,10 @@ function hasActionableForm(signals) {
   return !!signals?.hasActionableForm;
 }
 
+function hasLoginCredentials(config) {
+  return !!(config?.loginEmail && config?.loginPassword);
+}
+
 function scoreActionCandidate(candidate, currentUrl) {
   const text = `${candidate.text || ''} ${candidate.href || ''}`.toLowerCase();
   let score = candidate.kind === 'submit' ? 80 : 30;
@@ -1406,6 +1410,136 @@ async function execFillScript(tabId, instr) {
   }).catch(() => {});
 }
 
+async function tryAutoLoginStep(tabId, config) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (credentials) => {
+      const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const isVisible = (el) => {
+        if (!el) return false;
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+      };
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      const setReactValue = (el, text) => {
+        const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+        el.focus();
+        if (setter) setter.call(el, text); else el.value = text;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Tab' }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Tab' }));
+      };
+      const fillIfNeeded = (el, text) => {
+        if (!el || !text) return false;
+        if ((el.value || '').trim() === text.trim()) return false;
+        setReactValue(el, text);
+        return true;
+      };
+      const inputs = Array.from(document.querySelectorAll('input, textarea')).filter(isVisible);
+      const emailInput = inputs.find(el => {
+        const meta = normalize([
+          el.type,
+          el.name,
+          el.id,
+          el.placeholder,
+          el.getAttribute('aria-label'),
+          el.autocomplete,
+        ].join(' '));
+        return el.tagName === 'INPUT' && (
+          el.type === 'email' ||
+          /email|e-mail|user|username|login|identifier|account/.test(meta)
+        );
+      }) || null;
+      const passwordInput = inputs.find(el => el.tagName === 'INPUT' && el.type === 'password') || null;
+      const scopeForm = passwordInput?.form || emailInput?.form || null;
+      const clickables = Array.from((scopeForm || document).querySelectorAll('button, input[type="submit"], a[href], [role="button"]')).filter(isVisible);
+      const pickButton = (...patterns) => clickables.find(el => {
+        const text = normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+        return patterns.some(pattern => pattern.test(text));
+      }) || null;
+      let changed = false;
+      let stage = 'unknown';
+
+      if (emailInput) {
+        changed = fillIfNeeded(emailInput, credentials.loginEmail) || changed;
+        stage = passwordInput ? 'email_password' : 'email_only';
+      }
+      if (passwordInput) {
+        changed = fillIfNeeded(passwordInput, credentials.loginPassword) || changed;
+        stage = emailInput ? 'email_password' : 'password_only';
+      }
+
+      let clicked = false;
+      const loginButton = pickButton(
+        /log[\s-]?in|sign[\s-]?in|continue|next|submit|登录|继续|下一步|验证/i,
+        /create account|register|sign[\s-]?up|join/i
+      );
+      if (loginButton) {
+        loginButton.click();
+        clicked = true;
+      } else if (scopeForm?.requestSubmit) {
+        scopeForm.requestSubmit();
+        clicked = true;
+      } else if (scopeForm) {
+        scopeForm.submit();
+        clicked = true;
+      }
+
+      return {
+        stage,
+        hasEmailInput: !!emailInput,
+        hasPasswordInput: !!passwordInput,
+        changed,
+        clicked,
+      };
+    },
+    args: [{
+      loginEmail: config.loginEmail || '',
+      loginPassword: config.loginPassword || '',
+    }],
+  }).catch(() => [{ result: null }]);
+
+  return result[0]?.result || null;
+}
+
+async function tryAutoLogin(tabId, config, logStep) {
+  if (!hasLoginCredentials(config)) {
+    return { attempted: false, success: false, reason: '未配置登录凭据', signals: null };
+  }
+
+  let attempted = false;
+  for (let round = 0; round < 4; round++) {
+    const signals = await extractPageSignals(tabId);
+    if (!signals) {
+      return { attempted, success: false, reason: '页面状态提取失败', signals: null };
+    }
+    if (!isLoginPage(signals, null, '')) {
+      return { attempted, success: true, reason: '已退出登录页', signals };
+    }
+
+    const step = await tryAutoLoginStep(tabId, config);
+    if (!step || (!step.changed && !step.clicked)) {
+      return { attempted, success: false, reason: '未识别到可自动填写的登录表单', signals };
+    }
+
+    attempted = true;
+    logStep(`  → 自动登录: ${step.stage}${step.clicked ? '，已提交' : ''}`, 'info');
+    await waitForTabLoad(tabId, 20000);
+    await sleep(900);
+  }
+
+  const signals = await extractPageSignals(tabId);
+  return {
+    attempted,
+    success: !!(signals && !isLoginPage(signals, null, '')),
+    reason: '自动登录后仍停留在登录流程',
+    signals,
+  };
+}
+
 async function csvSubmitLoop(domains, config, aiConfig) {
   csvRunning = true;
   csvStop = false;
@@ -1534,17 +1668,38 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     }
 
     if (needsLogin) {
-      logStep('  ⚠ 检测到登录页，等待你登录后继续', 'info');
-      await injectFloatingBtn(workerTab.id, '检测到登录页，请先登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
-      await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
-      if (csvStop) break;
+      const autoLogin = await tryAutoLogin(workerTab.id, config, logStep);
+      if (autoLogin.success) {
+        logStep('  ✓ 自动登录完成，继续识别提交入口', 'ok');
+        signals = autoLogin.signals || await extractPageSignals(workerTab.id);
+        needsLogin = false;
+      } else {
+        if (autoLogin.attempted) {
+          logStep(`  ⚠ 自动登录未完成: ${autoLogin.reason}`, 'info');
+        }
+        logStep('  ⚠ 检测到登录页，等待你登录后继续', 'info');
+        await injectFloatingBtn(workerTab.id, '检测到登录页，请先登录', i+1, domains.length, false, '点击 → 检查登录状态');
+        await waitForNext({
+          tabId: workerTab.id,
+          autoResumeLogin: true,
+          loginPrompt: {
+            status: '检测到登录页，请先登录',
+            index: i + 1,
+            total: domains.length,
+            filled: false,
+            actionLabel: '点击 → 检查登录状态',
+          },
+        });
+        if (csvStop) break;
 
-      signals = await extractPageSignals(workerTab.id);
-      signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
-      if (!signals) {
-        logStep('  ✗ 登录后页面状态提取失败，自动跳过', 'err');
-        continue;
+        signals = await extractPageSignals(workerTab.id);
+        signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+        if (!signals) {
+          logStep('  ✗ 登录后页面状态提取失败，自动跳过', 'err');
+          continue;
+        }
       }
+      if (csvStop) break;
 
       if (!hasActionableForm(signals) && !signals.submitCandidateCount) {
         logStep('  ⊘ 登录后仍未发现提交入口，自动跳过', 'info');
@@ -1571,8 +1726,18 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     }
 
     if (needsLogin) {
-      await injectFloatingBtn(workerTab.id, '仍在登录页，请完成登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
-      await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
+      await injectFloatingBtn(workerTab.id, '仍在登录页，请完成登录', i+1, domains.length, false, '点击 → 检查登录状态');
+      await waitForNext({
+        tabId: workerTab.id,
+        autoResumeLogin: true,
+        loginPrompt: {
+          status: '仍在登录页，请完成登录',
+          index: i + 1,
+          total: domains.length,
+          filled: false,
+          actionLabel: '点击 → 检查登录状态',
+        },
+      });
       if (csvStop) break;
       i -= 1;
       continue;
@@ -1612,9 +1777,24 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
           signals = await extractPageSignals(workerTab.id);
           if (isLoginPage(signals, null, '')) {
-            logStep('  ⚠ 中间步骤进入登录页，等你登录后继续', 'info');
-            await injectFloatingBtn(workerTab.id, '中间步骤进入登录页，请先登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
-            await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
+            const autoLogin = await tryAutoLogin(workerTab.id, config, logStep);
+            if (!autoLogin.success) {
+              logStep('  ⚠ 中间步骤进入登录页，等你登录后继续', 'info');
+              await injectFloatingBtn(workerTab.id, '中间步骤进入登录页，请先登录', i+1, domains.length, false, '点击 → 检查登录状态');
+              await waitForNext({
+                tabId: workerTab.id,
+                autoResumeLogin: true,
+                loginPrompt: {
+                  status: '中间步骤进入登录页，请先登录',
+                  index: i + 1,
+                  total: domains.length,
+                  filled: false,
+                  actionLabel: '点击 → 检查登录状态',
+                },
+              });
+            } else {
+              logStep('  ✓ 中间步骤自动登录完成', 'ok');
+            }
             if (csvStop) break;
             signals = await extractPageSignals(workerTab.id);
           }
@@ -1682,26 +1862,52 @@ function waitForNext(options = {}) {
     let settled = false;
     let polling = false;
     let timer = null;
+    let manualCheckRequested = false;
 
     const finish = () => {
       if (settled) return;
       settled = true;
       if (timer) clearInterval(timer);
-      if (csvNextResolve === finish) csvNextResolve = null;
+      csvNextResolve = null;
       resolve();
     };
 
-    csvNextResolve = finish;
+    const runLoginCheck = async () => {
+      if (settled || csvStop || polling || !options.tabId) return;
+      polling = true;
+      try {
+        const signals = await extractPageSignals(options.tabId);
+        if (signals && !isLoginPage(signals, null, '')) {
+          finish();
+        } else if (options.loginPrompt) {
+          await injectFloatingBtn(
+            options.tabId,
+            options.loginPrompt.status,
+            options.loginPrompt.index,
+            options.loginPrompt.total,
+            options.loginPrompt.filled,
+            options.loginPrompt.actionLabel,
+          );
+        }
+      } catch {}
+      polling = false;
+    };
+
+    csvNextResolve = () => {
+      if (options.autoResumeLogin) {
+        manualCheckRequested = true;
+        runLoginCheck();
+        return;
+      }
+      finish();
+    };
 
     if (options.autoResumeLogin && options.tabId) {
       timer = setInterval(async () => {
-        if (settled || csvStop || polling) return;
-        polling = true;
-        try {
-          const signals = await extractPageSignals(options.tabId);
-          if (signals && !isLoginPage(signals, null, '')) finish();
-        } catch {}
-        polling = false;
+        if (manualCheckRequested) {
+          manualCheckRequested = false;
+        }
+        await runLoginCheck();
       }, options.intervalMs || 2000);
     }
   });

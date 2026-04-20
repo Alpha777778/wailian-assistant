@@ -221,6 +221,8 @@ $('btn-save-config').addEventListener('click', async () => {
   const cfg = {
     mirror: $('cfg-mirror').value.trim() || 'sem.3ue.co',
     author: $('cfg-author').value.trim(),
+    loginEmail: $('cfg-login-email').value.trim(),
+    loginPassword: $('cfg-login-password').value,
     aiMode: aiConfig.mode,
     aiBridgeUrl: aiConfig.bridgeUrl,
     aiUrl: aiConfig.url,
@@ -263,6 +265,8 @@ async function loadConfigToForm() {
   const cfg = await getConfig();
   if (cfg.mirror)  $('cfg-mirror').value   = cfg.mirror;
   if (cfg.author)  $('cfg-author').value   = cfg.author;
+  if (cfg.loginEmail) $('cfg-login-email').value = cfg.loginEmail;
+  if (cfg.loginPassword) $('cfg-login-password').value = cfg.loginPassword;
   $('cfg-ai-mode').value = normalizeAiMode(cfg.aiMode, !!(cfg.aiUrl || cfg.aiKey));
   $('cfg-ai-bridge-url').value = cfg.aiBridgeUrl || DEFAULT_LOCAL_BRIDGE_URL;
   if (cfg.aiUrl)   $('cfg-ai-url').value   = cfg.aiUrl;
@@ -1022,7 +1026,12 @@ $('btn-ai-submit').addEventListener('click', async () => {
     const res = await chrome.runtime.sendMessage({
       action: 'startCsvSubmit',
       domains: filtered,
-      config: { author: cfg.author || '', brief: cfg.brief },
+      config: {
+        author: cfg.author || '',
+        brief: cfg.brief,
+        loginEmail: cfg.loginEmail || '',
+        loginPassword: cfg.loginPassword || '',
+      },
       aiConfig,
     });
     if (!res?.ok) {
