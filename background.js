@@ -503,6 +503,12 @@ const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上�
 返回纯JSON（不加markdown代码块）：
 {"page_stage":"landing|auth_gate|login|submit_form|comment_form|review_form|other","form_type":"wp_comment|forum_reply|product_submit|directory_submit|review|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially|select|click|radio|checkbox"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"requires_login":false,"skip_reason":null}
 
+决策优先级：
+1. 优先产品提交 / 工具收录 / 发布文章 / 创建帖子 / 评测页
+2. 评论区是最后兜底
+3. 只有在站点没有更高价值的发布入口时，才允许返回 wp_comment 或 forum_reply
+4. 如果页面同时存在评论框和更高价值入口（如 Create Post / New Post / Write Post / Submit Product / Add Product / List Your Product / Get Listed），必须跳去更高价值入口，不能停留在评论框
+
 平台识别规则：
 【Product Hunt / 产品提交平台】
 - 目标：提交产品到 Product Hunt，获得产品页外链
@@ -521,6 +527,12 @@ const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上�
 - 找"Write a review"表单
 - form_type: "review"
 
+【社区/内容发布平台（DEV/Hashnode/Medium/Substack/Ghost/论坛发帖页等）】
+- 如果存在 Create Post / New Post / Write Post / Publish / Editor / Share your story / Submit post 之类入口，优先发帖或发布内容
+- 可以把这类流程归入 form_type: "product_submit" 或 "directory_submit"
+- 标题、摘要、正文、URL、标签等字段按页面实际表单填写
+- 只有确认没有发帖/发布入口时，才退回评论区
+
 【博客/论坛评论】
 - 找评论框，填name/email/website/comment
 - website字段填site_url
@@ -534,6 +546,8 @@ const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上�
 - 检测到antispam-bee时comment字段method用pressSequentially
 - 找不到任何可操作入口时，skip_reason填"无可用入口"
 - 严格遵守资料中的"禁止乱写的内容"和"AI写作指令"
+- 最终可提交步骤必须尽量返回 submit_selector，方便代码自动提交
+- 如果当前页面只有低价值评论表单，但页面顶部/导航存在更高价值发布入口，navigate_to 应该指向更高价值入口
 
 多步流程字段（重要）：
 - pre_clicks：填表前先点击的元素数组（如radio选项），不触发页面跳转
@@ -561,8 +575,36 @@ function randomEmail(name) {
 }
 
 const AUTH_TEXT_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|create an account|join|my account|continue with|google account|登录|登入|注册|账号|账户)/i;
-const SUBMIT_ENTRY_TEXT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
+const SUBMIT_ENTRY_TEXT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing|create post|new post|write post|publish|editor|share your story|submit post|create article|new article)/i;
 const IRRELEVANT_ACTION_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
+
+function intentPriority(intent = '') {
+  if (intent === 'product') return 5;
+  if (intent === 'directory') return 4;
+  if (intent === 'review') return 3;
+  if (intent === 'generic') return 2;
+  if (intent === 'comment') return 1;
+  return 0;
+}
+
+function classifyActionIntent(candidate) {
+  const text = `${candidate?.text || ''} ${candidate?.href || ''}`.toLowerCase();
+  if (/add product|submit product|submit tool|submit your product|submit your tool|list your product|list product|get listed|launch|post your product|share your startup|add listing|claim listing|directory/.test(text)) {
+    return 'product';
+  }
+  if (/create post|new post|write post|publish|editor|share your story|submit post|create article|new article/.test(text)) {
+    return 'product';
+  }
+  if (/write a review|leave a review|review this|review/.test(text)) {
+    return 'review';
+  }
+  if (/comment|reply|leave a reply|add comment/.test(text)) {
+    return 'comment';
+  }
+  if (candidate?.kind === 'submit') return 'generic';
+  if (candidate?.kind === 'auth') return 'auth';
+  return 'other';
+}
 
 function uniqueStrings(values = []) {
   return [...new Set(values.filter(Boolean))];
@@ -678,13 +720,17 @@ function hasLoginCredentials(config) {
 
 function scoreActionCandidate(candidate, currentUrl) {
   const text = `${candidate.text || ''} ${candidate.href || ''}`.toLowerCase();
+  const intent = candidate.intent || classifyActionIntent(candidate);
   let score = candidate.kind === 'submit' ? 80 : 30;
   if (SUBMIT_ENTRY_TEXT_RE.test(text)) score += 25;
   if (AUTH_TEXT_RE.test(text)) score += 10;
-  if (/comment|reply|review/.test(text)) score += 15;
+  if (intent === 'product') score += 55;
+  if (intent === 'review') score += 28;
+  if (intent === 'comment') score += 6;
   if (/submit|add|list|launch|claim|directory/.test(text)) score += 12;
   if (/log[\s-]?in|sign[\s-]?in|continue with/.test(text)) score += 40;
   if (/create account|sign[\s-]?up|register|join/.test(text)) score += 12;
+  if (/create post|new post|write post|publish|editor/.test(text)) score += 35;
   if (/product|tool|startup|website|site/.test(text)) score += 8;
   if (IRRELEVANT_ACTION_RE.test(text)) score -= 120;
   if (candidate.href && hostFromUrl(candidate.href) === hostFromUrl(currentUrl)) score += 6;
@@ -694,10 +740,18 @@ function scoreActionCandidate(candidate, currentUrl) {
 function pickBestActionCandidate(signals) {
   const candidates = (signals?.actionCandidates || [])
     .filter(c => c && (c.kind === 'submit' || c.kind === 'auth'))
-    .map(c => ({ ...c, score: scoreActionCandidate(c, signals.url) }))
+    .map(c => ({ ...c, intent: c.intent || classifyActionIntent(c), score: scoreActionCandidate(c, signals.url) }))
     .sort((a, b) => b.score - a.score);
 
   return candidates[0] || null;
+}
+
+function shouldPreferHigherValueEntry(signals) {
+  if (!hasActionableForm(signals)) return false;
+  const currentIntent = signals?.primaryFormIntent || 'generic';
+  const bestCandidate = pickBestActionCandidate(signals);
+  if (!bestCandidate || bestCandidate.kind !== 'submit') return false;
+  return intentPriority(bestCandidate.intent) > intentPriority(currentIntent);
 }
 
 async function openActionCandidate(tabId, candidate) {
@@ -752,7 +806,7 @@ async function extractPageSignals(tabId) {
     target: { tabId },
     func: () => {
       const AUTH_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|join|my account|continue with|google account|登录|注册|账号|账户)/i;
-      const SUBMIT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
+      const SUBMIT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing|create post|new post|write post|publish|editor|share your story|submit post|create article|new article)/i;
       const NOISE_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
       const LOGOUT_RE = /(logout|log out|sign out|退出登录|登出)/i;
       const LOGGED_IN_RE = /(profile|my profile|dashboard|settings|notifications|new post|create post|write post|editor|publish|compose|account settings|我的主页|个人中心|设置|通知|发布)/i;
@@ -760,6 +814,9 @@ async function extractPageSignals(tabId) {
       const NEWSLETTER_RE = /(newsletter|subscribe|subscription|weekly|updates|email list)/i;
       const ACTIONABLE_FIELD_RE = /(comment|review|reply|message|description|details|content|body|bio|website|url|link|title|name|product|tool|company|startup|listing|directory|headline|tagline)/i;
       const AUTH_FIELD_RE = /(login|sign[\s-]?in|register|sign[\s-]?up|password|username|account|email address)/i;
+      const PRODUCT_TEXT_RE = /(product|tool|startup|website|listing|directory|launch|submit|publish|post|article|story|editor|tagline|headline|company|app)/i;
+      const COMMENT_TEXT_RE = /(comment|reply|discussion|message|leave a reply|top comments)/i;
+      const REVIEW_TEXT_RE = /(review|rating|stars?|feedback|testimonial)/i;
 
       const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
       const isVisible = (el) => {
@@ -842,6 +899,22 @@ async function extractPageSignals(tabId) {
         const hasUrlField = normalizedFields.some(field => field.isUrlField);
         const hasContentField = normalizedFields.some(field => field.isContentField);
         const hasTitleField = normalizedFields.some(field => field.isTitleField);
+        const commentLike =
+          COMMENT_TEXT_RE.test(formContext) ||
+          (
+            hasContentField &&
+            normalizedFields.some(field => /comment|reply|message/.test(field.text)) &&
+            normalizedFields.some(field => /name|email|website|url/.test(field.text))
+          );
+        const reviewLike =
+          REVIEW_TEXT_RE.test(formContext) ||
+          normalizedFields.some(field => /rating|stars?|review/.test(field.text));
+        const publishLike =
+          /create post|new post|write post|publish|editor|story|article|draft/.test(formContext) ||
+          (hasTitleField && hasContentField && !commentLike);
+        const productLike =
+          (hasUrlField && (hasTitleField || PRODUCT_TEXT_RE.test(formContext))) ||
+          (publishLike && PRODUCT_TEXT_RE.test(formContext));
         const actionableFieldCount = normalizedFields.filter(field =>
           field.isVisibleField && (field.isUrlField || field.isContentField || field.isTitleField || ACTIONABLE_FIELD_RE.test(field.text))
         ).length;
@@ -850,11 +923,21 @@ async function extractPageSignals(tabId) {
           !searchLike &&
           !newsletterLike &&
           (
-            hasUrlField ||
-            (hasContentField && textishFields.length >= 1) ||
-            (hasTitleField && (hasContentField || visibleFields.length >= 3)) ||
+            productLike ||
+            publishLike ||
+            reviewLike ||
+            commentLike ||
             (visibleFields.length >= 3 && actionableFieldCount >= 2)
           );
+        const intent = reviewLike
+          ? 'review'
+          : (productLike || publishLike)
+            ? 'product'
+            : commentLike
+              ? 'comment'
+              : actionable
+                ? 'generic'
+                : 'other';
         return {
           selector: getSelector(form),
           action: form.getAttribute('action') || '',
@@ -867,6 +950,7 @@ async function extractPageSignals(tabId) {
           authLike,
           newsletterLike,
           actionable,
+          intent,
           fields: fields.slice(0, 16),
           html: form.outerHTML.slice(0, 4000),
         };
@@ -918,8 +1002,17 @@ async function extractPageSignals(tabId) {
         const key = `${kind}::${text}::${href || ''}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const intent =
+          /add product|submit product|submit tool|submit your product|submit your tool|list your product|list product|get listed|launch|post your product|share your startup|add listing|claim listing|directory|create post|new post|write post|publish|editor|share your story|submit post|create article|new article/.test(haystack)
+            ? 'product'
+            : /write a review|leave a review|review this|review/.test(haystack)
+              ? 'review'
+              : /comment|reply|leave a reply|add comment/.test(haystack)
+                ? 'comment'
+                : kind;
         actionCandidates.push({
           kind,
+          intent,
           text,
           href,
           selector: getSelector(el),
@@ -928,7 +1021,12 @@ async function extractPageSignals(tabId) {
       }
 
       const hasPasswordForm = forms.some(form => form.hasPassword) || !!document.querySelector('input[type="password"]');
-      const actionableForms = forms.filter(form => form.actionable);
+      const actionableForms = forms
+        .filter(form => form.actionable)
+        .sort((a, b) => {
+          const score = (intent) => intent === 'product' ? 4 : intent === 'review' ? 3 : intent === 'generic' ? 2 : intent === 'comment' ? 1 : 0;
+          return score(b.intent) - score(a.intent);
+        });
       const hasActionableForm = actionableForms.length > 0;
       const textLower = document.body.innerText.toLowerCase();
       const htmlLower = document.documentElement.outerHTML.toLowerCase();
@@ -961,6 +1059,7 @@ async function extractPageSignals(tabId) {
         hasPasswordForm,
         hasActionableForm,
         actionableFormCount: actionableForms.length,
+        primaryFormIntent: actionableForms[0]?.intent || 'other',
         submitCandidateCount,
         authCandidateCount,
         hasLoggedInUi,
@@ -986,6 +1085,7 @@ function buildAnalyzePrompt(config, name, email, signals) {
     hasPasswordForm: !!signals?.hasPasswordForm,
     hasActionableForm: !!signals?.hasActionableForm,
     actionableFormCount: signals?.actionableFormCount || 0,
+    primaryFormIntent: signals?.primaryFormIntent || 'other',
     submitCandidateCount: signals?.submitCandidateCount || 0,
     authCandidateCount: signals?.authCandidateCount || 0,
     hasLoggedInUi: !!signals?.hasLoggedInUi,
@@ -1032,7 +1132,9 @@ async function autoAdvanceToActionablePage(tabId, signals, onLog) {
   const visited = new Set([signals?.url || '']);
 
   for (let hop = 0; hop < 3; hop++) {
-    if (!current || hasActionableForm(current) || current.hasPasswordForm) return current;
+    if (!current) return current;
+    if (current.hasPasswordForm) return current;
+    if (hasActionableForm(current) && !shouldPreferHigherValueEntry(current)) return current;
 
     const candidate = pickBestActionCandidate(current);
     if (!candidate) return current;
@@ -1462,6 +1564,76 @@ async function execFillScript(tabId, instr) {
   }).catch(() => {});
 }
 
+async function attemptSubmitForm(tabId, instructions) {
+  const trigger = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (instr) => {
+      const selector = instr.submit_selector || 'button[type="submit"], input[type="submit"]';
+      const submitEl = document.querySelector(selector);
+      if (!submitEl) return { clicked: false, reason: '未找到提交按钮', beforeUrl: location.href };
+      const label = (submitEl.innerText || submitEl.textContent || submitEl.value || submitEl.getAttribute('aria-label') || '').trim();
+      submitEl.scrollIntoView({ block: 'center', inline: 'center' });
+      submitEl.click();
+      return { clicked: true, label, beforeUrl: location.href };
+    },
+    args: [instructions],
+  }).catch(() => [{ result: { clicked: false, reason: '提交脚本执行失败', beforeUrl: '' } }]);
+
+  const triggerResult = trigger[0]?.result || { clicked: false, reason: '提交脚本执行失败', beforeUrl: '' };
+  if (!triggerResult.clicked) {
+    return { ok: false, manual: true, reason: triggerResult.reason || '未点击提交按钮' };
+  }
+
+  await waitForTabLoad(tabId, 12000);
+  await sleep(1500);
+
+  const afterSignals = await extractPageSignals(tabId);
+  const check = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (beforeUrl) => {
+      const body = (document.body?.innerText || '').toLowerCase();
+      const successPatterns = [
+        /thank you/i, /thanks for/i, /success/i, /submitted/i, /published/i,
+        /pending review/i, /awaiting approval/i, /saved/i, /draft saved/i,
+        /your comment is awaiting moderation/i, /comment submitted/i,
+      ];
+      const errorPatterns = [
+        /required/i, /this field is required/i, /please fill/i, /invalid/i,
+        /captcha/i, /recaptcha/i, /hcaptcha/i, /turnstile/i,
+        /already associated/i, /already exists/i, /already been submitted/i,
+        /already listed/i, /duplicate/i, /error/i, /failed/i,
+      ];
+      const successText = successPatterns.find(pattern => pattern.test(body));
+      const errorText = errorPatterns.find(pattern => pattern.test(body));
+      return {
+        afterUrl: location.href,
+        urlChanged: location.href !== beforeUrl,
+        successText: successText ? successText.toString() : null,
+        errorText: errorText ? errorText.toString() : null,
+      };
+    },
+    args: [triggerResult.beforeUrl],
+  }).catch(() => [{ result: { afterUrl: '', urlChanged: false, successText: null, errorText: null } }]);
+
+  const status = check[0]?.result || {};
+  if (status.errorText) {
+    return { ok: false, manual: true, reason: `提交后页面提示错误: ${status.errorText}`, signals: afterSignals };
+  }
+  if (afterSignals?.hasCaptcha || instructions?.has_captcha) {
+    return { ok: false, manual: true, reason: '检测到验证码，需要人工处理', signals: afterSignals };
+  }
+  if (status.urlChanged || status.successText || !hasActionableForm(afterSignals)) {
+    return {
+      ok: true,
+      manual: false,
+      reason: status.successText ? `自动提交成功: ${status.successText}` : '自动提交完成',
+      signals: afterSignals,
+    };
+  }
+
+  return { ok: false, manual: true, reason: '自动提交结果不明确，保留人工确认', signals: afterSignals };
+}
+
 async function tryAutoLoginStep(tabId, config) {
   const result = await chrome.scripting.executeScript({
     target: { tabId },
@@ -1655,6 +1827,9 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     }
 
     logStep(`  → 页面阶段: ${signals.pageStage}${signals.hasCaptcha ? ' / captcha' : ''}`, 'info');
+    if (signals.primaryFormIntent && signals.primaryFormIntent !== 'other') {
+      logStep(`  → 当前表单意图: ${signals.primaryFormIntent}`, 'info');
+    }
     if (signals.hasLoggedInUi) {
       logStep(`  → 已登录态信号: ${(signals.loggedInIndicators || []).join(', ') || 'detected'}`, 'info');
     }
@@ -1889,10 +2064,20 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       }
 
       if (autoSkipped) continue;
+      const shouldAutoSubmit = true;
+      if (!signals?.hasCaptcha && !instructions?.has_captcha && shouldAutoSubmit) {
+        logStep('  → 尝试自动提交最终表单...', 'info');
+        const submitResult = await attemptSubmitForm(workerTab.id, stepInstr || instructions);
+        if (submitResult.ok) {
+          logStep(`  ✓ ${submitResult.reason}`, 'ok');
+          continue;
+        }
+        logStep(`  ⚠ ${submitResult.reason}`, 'info');
+      }
 
       const filledLabel = signals?.hasCaptcha || instructions?.has_captcha
         ? '已填写表单，如有验证码请先处理，提交后点击下一步 →'
-        : '已填写表单，请手动提交后点击下一步 →';
+        : '已填写表单，请检查后提交，完成后点击下一步 →';
       await injectFloatingBtn(workerTab.id, filledLabel, i+1, domains.length, true, '点击 → 提交完成，下一个域名');
     } else if (hasActionableForm(signals)) {
       logStep('  ⚠ 已识别到表单，当前等待你人工检查并提交', 'info');
