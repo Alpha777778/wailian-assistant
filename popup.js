@@ -89,6 +89,18 @@ function getProviderFromMode(mode) {
   return mode === 'local-claude' ? 'claude' : 'codex';
 }
 
+function normalizeLocalModel(mode, rawModel) {
+  const model = String(rawModel || '').trim();
+  if (!model) return '';
+  if (mode === 'local-codex') {
+    return /^(gpt|o\d|codex|oss)/i.test(model) ? model : 'gpt-5.4';
+  }
+  if (mode === 'local-claude') {
+    return /^claude/i.test(model) ? model : 'claude-sonnet-4-6';
+  }
+  return model;
+}
+
 function buildAiConfigFromValues(values = {}) {
   const hasCustomConfig = !!(values.aiUrl || values.aiKey);
   const mode = normalizeAiMode(values.aiMode, hasCustomConfig);
@@ -98,7 +110,9 @@ function buildAiConfigFromValues(values = {}) {
     bridgeUrl: normalizeBridgeUrl(values.aiBridgeUrl),
     url: String(values.aiUrl || '').trim(),
     key: String(values.aiKey || '').trim(),
-    model: String(values.aiModel || '').trim(),
+    model: isLocalAiMode(mode)
+      ? normalizeLocalModel(mode, values.aiModel)
+      : String(values.aiModel || '').trim(),
   };
 }
 
@@ -150,6 +164,10 @@ function syncAiModeUI() {
   $('cfg-ai-model').placeholder = isLocal
     ? (mode === 'local-claude' ? 'claude-sonnet-4-6（可留空）' : 'gpt-5.4（可留空）')
     : 'claude-sonnet-4-6';
+
+  if (isLocal) {
+    $('cfg-ai-model').value = normalizeLocalModel(mode, $('cfg-ai-model').value);
+  }
 
   $('ai-mode-hint').textContent = isLocal
     ? `本机模式会通过本地桥接调用 ${mode === 'local-claude' ? 'Claude' : 'Codex'}，直接复用当前机器里的登录态。`
@@ -1144,8 +1162,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('btn-ai-submit').disabled = true;
     $('btn-ai-stop').disabled = false;
     setGlobalStop(true);
-    // 切换到交叉分析 tab 让用户看到日志
-    logAI('半自动提交流程后台运行中，点击「停止任务」可中止', 'info');
+    setStatus('半自动提交流程后台运行中');
   }
 
   // 批量导出完成时 popup 未打开 → 打开后提示，不自动触发（避免用户困惑）

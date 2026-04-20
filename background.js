@@ -649,13 +649,14 @@ function isLoginPage(signals, instructions, skipReason = '') {
   return !!(
     signals?.hasPasswordForm ||
     signals?.pageStage === 'login' ||
+    signals?.pageStage === 'auth_gate' ||
     instructions?.requires_login === true ||
     /login|sign.?in|register|account|登录|注册|账号/.test(reason)
   );
 }
 
 function hasActionableForm(signals) {
-  return !!signals?.hasFillableForm;
+  return !!signals?.hasActionableForm;
 }
 
 function scoreActionCandidate(candidate, currentUrl) {
@@ -665,6 +666,8 @@ function scoreActionCandidate(candidate, currentUrl) {
   if (AUTH_TEXT_RE.test(text)) score += 10;
   if (/comment|reply|review/.test(text)) score += 15;
   if (/submit|add|list|launch|claim|directory/.test(text)) score += 12;
+  if (/log[\s-]?in|sign[\s-]?in|continue with/.test(text)) score += 40;
+  if (/create account|sign[\s-]?up|register|join/.test(text)) score += 12;
   if (/product|tool|startup|website|site/.test(text)) score += 8;
   if (IRRELEVANT_ACTION_RE.test(text)) score -= 120;
   if (candidate.href && hostFromUrl(candidate.href) === hostFromUrl(currentUrl)) score += 6;
@@ -734,6 +737,10 @@ async function extractPageSignals(tabId) {
       const AUTH_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|join|my account|continue with|google account|登录|注册|账号|账户)/i;
       const SUBMIT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
       const NOISE_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
+      const SEARCH_RE = /(search|algolia|query|keyword|find)/i;
+      const NEWSLETTER_RE = /(newsletter|subscribe|subscription|weekly|updates|email list)/i;
+      const ACTIONABLE_FIELD_RE = /(comment|review|reply|message|description|details|content|body|bio|website|url|link|title|name|product|tool|company|startup|listing|directory|headline|tagline)/i;
+      const AUTH_FIELD_RE = /(login|sign[\s-]?in|register|sign[\s-]?up|password|username|account|email address)/i;
 
       const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
       const isVisible = (el) => {
@@ -781,6 +788,53 @@ async function extractPageSignals(tabId) {
           label: getFieldLabel(el),
           required: el.required || el.getAttribute('aria-required') === 'true',
         }));
+        const normalizedFields = fields.map(field => {
+          const text = `${field.name} ${field.label} ${field.type}`.toLowerCase();
+          const isVisibleField = !['hidden', 'submit', 'button', 'reset', 'image'].includes(field.type);
+          const isSearchField = field.type === 'search' || SEARCH_RE.test(text);
+          const isAuthField = field.type === 'password' || AUTH_FIELD_RE.test(text);
+          const isUrlField = field.type === 'url' || /website|url|link/.test(text);
+          const isContentField = field.tag === 'textarea' || /comment|review|reply|description|message|content|details|bio/.test(text);
+          const isTitleField = /title|name|product|tool|company|startup|headline|tagline/.test(text);
+          return {
+            ...field,
+            text,
+            isVisibleField,
+            isSearchField,
+            isAuthField,
+            isUrlField,
+            isContentField,
+            isTitleField,
+          };
+        });
+        const visibleFields = normalizedFields.filter(field => field.isVisibleField);
+        const textishFields = visibleFields.filter(field =>
+          ['text', 'email', 'url', 'tel', 'search', 'number', 'textarea', 'select', ''].includes(field.type) ||
+          field.tag === 'textarea' || field.tag === 'select'
+        );
+        const formText = normalize(form.innerText || form.textContent || '').toLowerCase();
+        const formContext = `${formText} ${form.getAttribute('action') || ''} ${form.getAttribute('method') || ''}`.trim();
+        const searchLike = SEARCH_RE.test(formContext) || (visibleFields.length > 0 && visibleFields.every(field => field.isSearchField));
+        const authLike = normalizedFields.some(field => field.isAuthField) || AUTH_RE.test(formContext);
+        const newsletterLike =
+          NEWSLETTER_RE.test(formContext) ||
+          (visibleFields.length <= 2 && visibleFields.some(field => field.type === 'email') && !normalizedFields.some(field => field.isUrlField || field.isContentField));
+        const hasUrlField = normalizedFields.some(field => field.isUrlField);
+        const hasContentField = normalizedFields.some(field => field.isContentField);
+        const hasTitleField = normalizedFields.some(field => field.isTitleField);
+        const actionableFieldCount = normalizedFields.filter(field =>
+          field.isVisibleField && (field.isUrlField || field.isContentField || field.isTitleField || ACTIONABLE_FIELD_RE.test(field.text))
+        ).length;
+        const actionable =
+          !authLike &&
+          !searchLike &&
+          !newsletterLike &&
+          (
+            hasUrlField ||
+            (hasContentField && textishFields.length >= 1) ||
+            (hasTitleField && (hasContentField || visibleFields.length >= 3)) ||
+            (visibleFields.length >= 3 && actionableFieldCount >= 2)
+          );
         return {
           selector: getSelector(form),
           action: form.getAttribute('action') || '',
@@ -789,6 +843,10 @@ async function extractPageSignals(tabId) {
           hasPassword: fields.some(f => f.type === 'password'),
           hasTextarea: fields.some(f => f.tag === 'textarea'),
           hasFileInput: fields.some(f => f.type === 'file'),
+          searchLike,
+          authLike,
+          newsletterLike,
+          actionable,
           fields: fields.slice(0, 16),
           html: form.outerHTML.slice(0, 4000),
         };
@@ -822,17 +880,21 @@ async function extractPageSignals(tabId) {
       }
 
       const hasPasswordForm = forms.some(form => form.hasPassword) || !!document.querySelector('input[type="password"]');
-      const hasFillableForm = forms.some(form => !form.hasPassword && form.fieldCount > 0 && (form.hasTextarea || form.fields.some(f => !['hidden', 'submit', 'button'].includes(f.type))));
+      const actionableForms = forms.filter(form => form.actionable);
+      const hasActionableForm = actionableForms.length > 0;
       const textLower = document.body.innerText.toLowerCase();
       const htmlLower = document.documentElement.outerHTML.toLowerCase();
       const hasCaptcha = /(captcha|recaptcha|hcaptcha|turnstile)/i.test(textLower) || /(captcha|recaptcha|hcaptcha|turnstile)/i.test(htmlLower);
       const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(el => normalize(el.textContent)).filter(Boolean).slice(0, 10);
+      const submitCandidateCount = actionCandidates.filter(item => item.kind === 'submit').length;
+      const authCandidateCount = actionCandidates.filter(item => item.kind === 'auth').length;
 
       let pageStage = 'unknown';
       if (hasPasswordForm) pageStage = 'login';
-      else if (hasFillableForm) pageStage = 'form';
-      else if (actionCandidates.some(item => item.kind === 'submit')) pageStage = 'entry';
-      else if (actionCandidates.some(item => item.kind === 'auth')) pageStage = 'auth_gate';
+      else if (authCandidateCount > 0 && !hasActionableForm && submitCandidateCount === 0) pageStage = 'auth_gate';
+      else if (hasActionableForm) pageStage = 'form';
+      else if (submitCandidateCount > 0) pageStage = 'entry';
+      else if (authCandidateCount > 0) pageStage = 'auth_gate';
 
       const snippetParts = [
         `<title>${document.title}</title>`,
@@ -847,7 +909,10 @@ async function extractPageSignals(tabId) {
         title: document.title,
         pageStage,
         hasPasswordForm,
-        hasFillableForm,
+        hasActionableForm,
+        actionableFormCount: actionableForms.length,
+        submitCandidateCount,
+        authCandidateCount,
         hasCaptcha,
         headings,
         forms,
@@ -866,7 +931,10 @@ function buildAnalyzePrompt(config, name, email, signals) {
     title: signals?.title || '',
     pageStage: signals?.pageStage || 'unknown',
     hasPasswordForm: !!signals?.hasPasswordForm,
-    hasFillableForm: !!signals?.hasFillableForm,
+    hasActionableForm: !!signals?.hasActionableForm,
+    actionableFormCount: signals?.actionableFormCount || 0,
+    submitCandidateCount: signals?.submitCandidateCount || 0,
+    authCandidateCount: signals?.authCandidateCount || 0,
     hasCaptcha: !!signals?.hasCaptcha,
     headings: signals?.headings || [],
     forms: (signals?.forms || []).map(form => ({
@@ -1402,10 +1470,23 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
     logStep(`  → 页面阶段: ${signals.pageStage}${signals.hasCaptcha ? ' / captcha' : ''}`, 'info');
     signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+    logStep(`  → 自动跳转后阶段: ${signals?.pageStage || 'unknown'}`, 'info');
+
+    if (!signals) {
+      logStep('  ✗ 页面状态丢失，自动跳过', 'err');
+      continue;
+    }
 
     let instructions = null;
     let skipReason = null;
     let needsLogin = false;
+
+    if (isLoginPage(signals, null, '')) {
+      needsLogin = true;
+    } else if (!hasActionableForm(signals) && !signals.submitCandidateCount) {
+      logStep('  ⊘ 未发现可提交入口，自动跳过', 'info');
+      continue;
+    }
 
     const analyzeCurrentSignals = async () => {
       instructions = await analyzeSignalsWithAI(config, aiConfig, signals);
@@ -1413,12 +1494,14 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       needsLogin = isLoginPage(signals, instructions, skipReason);
     };
 
-    logStep('  → AI 分析页面结构...', 'info');
-    try {
-      await analyzeCurrentSignals();
-    } catch (e) {
-      logStep(`  ✗ AI分析失败: ${e.message}`, 'err');
-      skipReason = 'AI分析失败';
+    if (!needsLogin) {
+      logStep('  → AI 分析页面结构...', 'info');
+      try {
+        await analyzeCurrentSignals();
+      } catch (e) {
+        logStep(`  ✗ AI分析失败: ${e.message}`, 'err');
+        skipReason = 'AI分析失败';
+      }
     }
 
     if (instructions?.navigate_to && !instructions.skip_reason) {
@@ -1434,11 +1517,18 @@ async function csvSubmitLoop(domains, config, aiConfig) {
         await sleep(900);
         signals = await extractPageSignals(workerTab.id);
         signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
-        try {
-          await analyzeCurrentSignals();
-        } catch (e) {
-          logStep(`  ✗ 子页AI分析失败: ${e.message}`, 'err');
-          skipReason = 'AI子页分析失败';
+        if (isLoginPage(signals, null, '')) {
+          needsLogin = true;
+        } else if (!hasActionableForm(signals) && !signals?.submitCandidateCount) {
+          logStep('  ⊘ 子页没有可提交入口，自动跳过', 'info');
+          continue;
+        } else {
+          try {
+            await analyzeCurrentSignals();
+          } catch (e) {
+            logStep(`  ✗ 子页AI分析失败: ${e.message}`, 'err');
+            skipReason = 'AI子页分析失败';
+          }
         }
       }
     }
@@ -1451,6 +1541,15 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
       signals = await extractPageSignals(workerTab.id);
       signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+      if (!signals) {
+        logStep('  ✗ 登录后页面状态提取失败，自动跳过', 'err');
+        continue;
+      }
+
+      if (!hasActionableForm(signals) && !signals.submitCandidateCount) {
+        logStep('  ⊘ 登录后仍未发现提交入口，自动跳过', 'info');
+        continue;
+      }
 
       try {
         logStep('  → 登录后重新分析页面...', 'info');

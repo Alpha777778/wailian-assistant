@@ -62,6 +62,18 @@ function extractClaudeModel() {
   return settings?.model || 'claude-sonnet-4-6';
 }
 
+function normalizeRequestedModel(provider, model) {
+  const value = String(model || '').trim();
+  if (!value) return '';
+  if (provider === 'codex') {
+    return /^(gpt|o\d|codex|oss)/i.test(value) ? value : '';
+  }
+  if (provider === 'claude') {
+    return /^claude/i.test(value) ? value : '';
+  }
+  return value;
+}
+
 function getProviderStatus() {
   const claudeSettings = readJsonFile(CLAUDE_SETTINGS_PATH) || {};
   const claudeCreds = readJsonFile(CLAUDE_CREDENTIALS_PATH) || {};
@@ -207,6 +219,7 @@ function runProcess(command, args, { cwd = __dirname, input = '', timeoutMs = 10
 
 async function runCodexCompletion({ messages, model }) {
   const prompt = buildCodexPrompt(messages);
+  const requestedModel = normalizeRequestedModel('codex', model) || extractCodexModel();
   const outputFile = path.join(tmpdir(), `wailian-codex-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
   const args = [
     'exec',
@@ -214,11 +227,12 @@ async function runCodexCompletion({ messages, model }) {
     '--ephemeral',
     '--dangerously-bypass-approvals-and-sandbox',
     '--color', 'never',
+    '-c', 'model_reasoning_effort="low"',
     '-C', __dirname,
     '-o', outputFile,
   ];
 
-  if (model) args.push('-m', model);
+  if (requestedModel) args.push('-m', requestedModel);
 
   const result = await runProcess('codex', args, { input: prompt });
   const content = existsSync(outputFile) ? readTextFile(outputFile).trim() : '';
@@ -234,7 +248,7 @@ async function runCodexCompletion({ messages, model }) {
   }
 
   return {
-    model: model || extractCodexModel(),
+    model: requestedModel,
     content,
   };
 }
@@ -262,7 +276,7 @@ async function runClaudeCompletion({ messages, model, maxTokens = 800, temperatu
     method: 'POST',
     headers,
     body: JSON.stringify({
-      model: model || extractClaudeModel(),
+      model: normalizeRequestedModel('claude', model) || extractClaudeModel(),
       max_tokens: Math.min(Math.max(Number(maxTokens) || 800, 64), 4096),
       temperature,
       system: systemText || undefined,
@@ -290,7 +304,7 @@ async function runClaudeCompletion({ messages, model, maxTokens = 800, temperatu
   }
 
   return {
-    model: model || extractClaudeModel(),
+    model: normalizeRequestedModel('claude', model) || extractClaudeModel(),
     content,
   };
 }
