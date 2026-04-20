@@ -646,12 +646,25 @@ function sanitizeDomainsForNavigation(domains = []) {
 
 function isLoginPage(signals, instructions, skipReason = '') {
   const reason = `${skipReason || ''} ${instructions?.page_stage || ''}`.toLowerCase();
+  const aiSuggestsLogin = !!(
+    instructions?.requires_login === true ||
+    /login|sign.?in|register|account|登录|注册|账号/.test(reason)
+  );
+
+  if (signals?.hasLoggedInUi || signals?.hasLogoutAction) {
+    if (!signals?.hasPasswordForm) return false;
+    if (signals?.hasActionableForm) return false;
+  }
+
+  if (signals?.hasActionableForm && !signals?.hasPasswordForm && signals?.pageStage !== 'auth_gate') {
+    return false;
+  }
+
   return !!(
     signals?.hasPasswordForm ||
     signals?.pageStage === 'login' ||
-    signals?.pageStage === 'auth_gate' ||
-    instructions?.requires_login === true ||
-    /login|sign.?in|register|account|登录|注册|账号/.test(reason)
+    (signals?.pageStage === 'auth_gate' && !signals?.hasLoggedInUi) ||
+    (aiSuggestsLogin && !signals?.hasLoggedInUi && !signals?.hasActionableForm)
   );
 }
 
@@ -741,6 +754,8 @@ async function extractPageSignals(tabId) {
       const AUTH_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|join|my account|continue with|google account|登录|注册|账号|账户)/i;
       const SUBMIT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
       const NOISE_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
+      const LOGOUT_RE = /(logout|log out|sign out|退出登录|登出)/i;
+      const LOGGED_IN_RE = /(profile|my profile|dashboard|settings|notifications|new post|create post|write post|editor|publish|compose|account settings|我的主页|个人中心|设置|通知|发布)/i;
       const SEARCH_RE = /(search|algolia|query|keyword|find)/i;
       const NEWSLETTER_RE = /(newsletter|subscribe|subscription|weekly|updates|email list)/i;
       const ACTIONABLE_FIELD_RE = /(comment|review|reply|message|description|details|content|body|bio|website|url|link|title|name|product|tool|company|startup|listing|directory|headline|tagline)/i;
@@ -758,6 +773,7 @@ async function extractPageSignals(tabId) {
         if (window.CSS?.escape) return window.CSS.escape(value);
         return String(value).replace(/["\\#.:>+~*^$|=,[\\]()]/g, '\\$&');
       };
+      const isHeaderNavElement = (el) => !!el?.closest('header, nav, [role="navigation"], [class*="header"], [class*="nav"], [id*="header"], [id*="nav"], .topbar, .navbar');
 
       const getSelector = (el) => {
         if (!el) return null;
@@ -858,6 +874,34 @@ async function extractPageSignals(tabId) {
 
       const actionCandidates = [];
       const seen = new Set();
+      const clickables = Array.from(document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"]'));
+      const loggedInIndicators = new Set();
+      for (const el of clickables) {
+        if (!isVisible(el)) continue;
+        const text = normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+        const href = el.tagName === 'A'
+          ? (() => { try { return new URL(el.getAttribute('href') || el.href, location.href).toString(); } catch { return null; } })()
+          : null;
+        const haystack = `${text} ${href || ''}`.toLowerCase();
+        if (LOGOUT_RE.test(haystack)) loggedInIndicators.add('logout');
+        if (isHeaderNavElement(el) && LOGGED_IN_RE.test(haystack) && !AUTH_RE.test(haystack)) loggedInIndicators.add('nav-account');
+        if (isHeaderNavElement(el) && /\/dashboard|\/settings|\/notifications|\/new|\/editor|\/me\b|\/profile/i.test(href || '')) {
+          loggedInIndicators.add('nav-href');
+        }
+      }
+
+      for (const img of Array.from(document.querySelectorAll('header img, nav img, [role="navigation"] img, .topbar img, .navbar img'))) {
+        if (!isVisible(img)) continue;
+        const meta = normalize([
+          img.alt,
+          img.getAttribute('aria-label'),
+          img.className,
+          img.getAttribute('data-testid'),
+          img.src,
+        ].join(' ')).toLowerCase();
+        if (/avatar|profile|user|account/.test(meta)) loggedInIndicators.add('avatar');
+      }
+
       for (const el of Array.from(document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"]'))) {
         if (!isVisible(el)) continue;
         const text = normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
@@ -892,13 +936,15 @@ async function extractPageSignals(tabId) {
       const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(el => normalize(el.textContent)).filter(Boolean).slice(0, 10);
       const submitCandidateCount = actionCandidates.filter(item => item.kind === 'submit').length;
       const authCandidateCount = actionCandidates.filter(item => item.kind === 'auth').length;
+      const hasLogoutAction = loggedInIndicators.has('logout');
+      const hasLoggedInUi = hasLogoutAction || loggedInIndicators.size > 0;
 
       let pageStage = 'unknown';
       if (hasPasswordForm) pageStage = 'login';
-      else if (authCandidateCount > 0 && !hasActionableForm && submitCandidateCount === 0) pageStage = 'auth_gate';
+      else if (authCandidateCount > 0 && !hasActionableForm && submitCandidateCount === 0 && !hasLoggedInUi) pageStage = 'auth_gate';
       else if (hasActionableForm) pageStage = 'form';
       else if (submitCandidateCount > 0) pageStage = 'entry';
-      else if (authCandidateCount > 0) pageStage = 'auth_gate';
+      else if (authCandidateCount > 0 && !hasLoggedInUi) pageStage = 'auth_gate';
 
       const snippetParts = [
         `<title>${document.title}</title>`,
@@ -917,6 +963,9 @@ async function extractPageSignals(tabId) {
         actionableFormCount: actionableForms.length,
         submitCandidateCount,
         authCandidateCount,
+        hasLoggedInUi,
+        hasLogoutAction,
+        loggedInIndicators: [...loggedInIndicators],
         hasCaptcha,
         headings,
         forms,
@@ -939,6 +988,9 @@ function buildAnalyzePrompt(config, name, email, signals) {
     actionableFormCount: signals?.actionableFormCount || 0,
     submitCandidateCount: signals?.submitCandidateCount || 0,
     authCandidateCount: signals?.authCandidateCount || 0,
+    hasLoggedInUi: !!signals?.hasLoggedInUi,
+    hasLogoutAction: !!signals?.hasLogoutAction,
+    loggedInIndicators: signals?.loggedInIndicators || [],
     hasCaptcha: !!signals?.hasCaptcha,
     headings: signals?.headings || [],
     forms: (signals?.forms || []).map(form => ({
@@ -1603,6 +1655,9 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     }
 
     logStep(`  → 页面阶段: ${signals.pageStage}${signals.hasCaptcha ? ' / captcha' : ''}`, 'info');
+    if (signals.hasLoggedInUi) {
+      logStep(`  → 已登录态信号: ${(signals.loggedInIndicators || []).join(', ') || 'detected'}`, 'info');
+    }
     signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
     logStep(`  → 自动跳转后阶段: ${signals?.pageStage || 'unknown'}`, 'info');
 
