@@ -32,6 +32,10 @@
 ### 配置
 - 评论者姓名、邮箱、网站 URL
 - 最小 AS 分、提交间隔、每批数量
+- AI 半自动提交支持三种模式：
+  - 本机 Codex：复用 `~/.codex` 当前登录态
+  - 本机 Claude：复用 `~/.claude` 当前登录态和 Base URL
+  - 自定义 OpenAI 兼容 API
 
 ---
 
@@ -57,6 +61,13 @@
 3. 点击「开始批量导出」，等待自动完成
 4. 下载目录会出现每个竞品对应的 Excel 文件
 
+### 半自动提交
+1. 先运行仓库里的 `start-local-ai-bridge.cmd`
+2. 扩展「配置」页选择 `本机 Codex`、`本机 Claude` 或 `自定义 OpenAI 兼容 API`
+3. 本机模式默认桥接地址使用 `http://127.0.0.1:8765`
+4. 在「交叉分析」页导入 CSV / TXT / XLSX / XLS，或直接使用下方交叉分析结果
+5. 点击「开始半自动」，插件会自动识别入口、自动填表，你负责登录、验证码和最终提交
+
 ---
 
 ## 文件结构
@@ -66,6 +77,8 @@
 ├── popup.html             # 弹窗 UI
 ├── popup.js               # 弹窗逻辑
 ├── background.js          # Service Worker（评论提交）
+├── local-ai-bridge.mjs    # 本机 AI 桥接服务
+├── start-local-ai-bridge.cmd # 启动本机 AI 桥接
 ├── content_semrush.js     # 注入 SEMrush 页面的内容脚本
 └── icon*.png              # 图标
 ```
@@ -77,4 +90,5 @@
 - 需要在 SEMrush 镜像站已登录的状态下使用
 - 批量导出时请勿关闭镜像站 tab
 - 关闭 popup 不会丢失日志和域名列表（已持久化到 storage）
+- 本机 AI 模式需要保持 `start-local-ai-bridge.cmd` 对应的窗口持续运行
 - 提交评论功能建议配合独立的 Python 提交工具使用，成功率更高

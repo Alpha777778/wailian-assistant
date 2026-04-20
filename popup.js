@@ -48,6 +48,13 @@ function restoreLog(boxId, entries) {
   box.scrollTop = box.scrollHeight;
 }
 
+function clearLogHistory(boxId) {
+  const box = $(boxId);
+  if (box) box.innerHTML = '';
+  const key = LOG_STORE[boxId];
+  if (key) chrome.storage.local.remove(key);
+}
+
 const logD = (m, t) => log('log-discover', m, t);
 
 function setStatus(msg) {
@@ -65,6 +72,93 @@ async function saveConfig(cfg) {
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const DEFAULT_LOCAL_BRIDGE_URL = 'http://127.0.0.1:8765';
+
+function normalizeAiMode(mode, hasCustomConfig = false) {
+  if (mode === 'custom' || mode === 'local-codex' || mode === 'local-claude') return mode;
+  return hasCustomConfig ? 'custom' : 'local-codex';
+}
+
+function normalizeBridgeUrl(raw) {
+  let value = String(raw || '').trim() || DEFAULT_LOCAL_BRIDGE_URL;
+  if (!/^https?:\/\//i.test(value)) value = `http://${value}`;
+  return value.replace(/\/$/, '');
+}
+
+function getProviderFromMode(mode) {
+  return mode === 'local-claude' ? 'claude' : 'codex';
+}
+
+function buildAiConfigFromValues(values = {}) {
+  const hasCustomConfig = !!(values.aiUrl || values.aiKey);
+  const mode = normalizeAiMode(values.aiMode, hasCustomConfig);
+  return {
+    mode,
+    provider: getProviderFromMode(mode),
+    bridgeUrl: normalizeBridgeUrl(values.aiBridgeUrl),
+    url: String(values.aiUrl || '').trim(),
+    key: String(values.aiKey || '').trim(),
+    model: String(values.aiModel || '').trim(),
+  };
+}
+
+function buildAiConfigFromForm() {
+  return buildAiConfigFromValues({
+    aiMode: $('cfg-ai-mode').value,
+    aiBridgeUrl: $('cfg-ai-bridge-url').value,
+    aiUrl: $('cfg-ai-url').value,
+    aiKey: $('cfg-ai-key').value,
+    aiModel: $('cfg-ai-model').value,
+  });
+}
+
+function isLocalAiMode(mode) {
+  return mode === 'local-codex' || mode === 'local-claude';
+}
+
+function getAiValidationError(aiConfig) {
+  if (isLocalAiMode(aiConfig.mode)) {
+    if (!aiConfig.bridgeUrl) return '请先填写本机桥接地址';
+    return '';
+  }
+
+  if (!aiConfig.url || !aiConfig.key || !aiConfig.model) {
+    return '请先填写 URL / 密钥 / 模型';
+  }
+  return '';
+}
+
+function setAiTestResult(text, color = '#6b7280') {
+  const result = $('ai-test-result');
+  result.style.color = color;
+  result.textContent = text;
+}
+
+function syncAiModeUI() {
+  const mode = normalizeAiMode($('cfg-ai-mode').value, !!($('cfg-ai-url').value || $('cfg-ai-key').value));
+  const isLocal = isLocalAiMode(mode);
+  $('cfg-ai-mode').value = mode;
+  $('cfg-ai-bridge-row').style.display = isLocal ? '' : 'none';
+  $('cfg-ai-url-row').style.display = isLocal ? 'none' : '';
+  $('cfg-ai-key-row').style.display = isLocal ? 'none' : '';
+
+  $('cfg-ai-model-label').textContent = '模型';
+  $('cfg-ai-model-hint').textContent = isLocal
+    ? '（可留空，桥接服务会读取本机默认模型）'
+    : '（Claude: claude-sonnet-4-6 / GPT: gpt-4o）';
+
+  $('cfg-ai-model').placeholder = isLocal
+    ? (mode === 'local-claude' ? 'claude-sonnet-4-6（可留空）' : 'gpt-5.4（可留空）')
+    : 'claude-sonnet-4-6';
+
+  $('ai-mode-hint').textContent = isLocal
+    ? `本机模式会通过本地桥接调用 ${mode === 'local-claude' ? 'Claude' : 'Codex'}，直接复用当前机器里的登录态。`
+    : '自定义模式兼容 OpenAI Chat Completions 接口。';
+
+  if (isLocal && !$('cfg-ai-bridge-url').value.trim()) {
+    $('cfg-ai-bridge-url').value = DEFAULT_LOCAL_BRIDGE_URL;
+  }
+}
 
 function waitForTabLoad(tabId, timeout = 15000) {
   return new Promise(resolve => {
@@ -91,6 +185,7 @@ function setGlobalStop(visible) {
 $('btn-global-stop').addEventListener('click', async () => {
   chrome.runtime.sendMessage({ action: 'stopBatchExport' });
   chrome.runtime.sendMessage({ action: 'stopAiSubmit' });
+  chrome.runtime.sendMessage({ action: 'stopCsvSubmit' });
   setGlobalStop(false);
   setStatus('正在停止所有任务...');
   // 恢复各面板按钮状态
@@ -104,46 +199,43 @@ $('btn-global-stop').addEventListener('click', async () => {
 
 // ── 配置面板 ──────────────────────────────────────────────────────────────────
 $('btn-save-config').addEventListener('click', async () => {
+  const aiConfig = buildAiConfigFromForm();
   const cfg = {
-    mirror:  $('cfg-mirror').value.trim() || 'sem.3ue.co',
-    author:  $('cfg-author').value.trim(),
-    aiUrl:   $('cfg-ai-url').value.trim(),
-    aiKey:   $('cfg-ai-key').value.trim(),
-    aiModel: $('cfg-ai-model').value.trim(),
+    mirror: $('cfg-mirror').value.trim() || 'sem.3ue.co',
+    author: $('cfg-author').value.trim(),
+    aiMode: aiConfig.mode,
+    aiBridgeUrl: aiConfig.bridgeUrl,
+    aiUrl: aiConfig.url,
+    aiKey: aiConfig.key,
+    aiModel: aiConfig.model,
   };
   const old = await getConfig();
   if (old.brief)     cfg.brief     = old.brief;
   if (old.briefName) cfg.briefName = old.briefName;
   await saveConfig(cfg);
+  syncAiModeUI();
   setStatus('✓ 配置已保存');
 });
 
 $('btn-test-ai').addEventListener('click', async () => {
-  const url   = $('cfg-ai-url').value.trim();
-  const key   = $('cfg-ai-key').value.trim();
-  const model = $('cfg-ai-model').value.trim();
-  const result = $('ai-test-result');
-
-  if (!url || !key || !model) {
-    result.style.color = '#ef4444';
-    result.textContent = '请先填写 URL / 密钥 / 模型';
+  const aiConfig = buildAiConfigFromForm();
+  const validationError = getAiValidationError(aiConfig);
+  if (validationError) {
+    setAiTestResult(validationError, '#ef4444');
     return;
   }
 
   $('btn-test-ai').disabled = true;
-  result.style.color = '#6b7280';
-  result.textContent = '测试中...';
+  setAiTestResult('测试中...');
 
   chrome.runtime.sendMessage(
-    { action: 'testAiConfig', url, key, model },
+    { action: 'testAiConfig', aiConfig },
     (resp) => {
       $('btn-test-ai').disabled = false;
       if (resp && resp.ok) {
-        result.style.color = '#059669';
-        result.textContent = `✓ 成功 · 回复: ${resp.reply}`;
+        setAiTestResult(`✓ 成功 · 回复: ${resp.reply}`, '#059669');
       } else {
-        result.style.color = '#ef4444';
-        result.textContent = `✗ ${resp?.error || '无响应'}`;
+        setAiTestResult(`✗ ${resp?.error || '无响应'}`, '#ef4444');
       }
     }
   );
@@ -153,11 +245,16 @@ async function loadConfigToForm() {
   const cfg = await getConfig();
   if (cfg.mirror)  $('cfg-mirror').value   = cfg.mirror;
   if (cfg.author)  $('cfg-author').value   = cfg.author;
+  $('cfg-ai-mode').value = normalizeAiMode(cfg.aiMode, !!(cfg.aiUrl || cfg.aiKey));
+  $('cfg-ai-bridge-url').value = cfg.aiBridgeUrl || DEFAULT_LOCAL_BRIDGE_URL;
   if (cfg.aiUrl)   $('cfg-ai-url').value   = cfg.aiUrl;
   if (cfg.aiKey)   $('cfg-ai-key').value   = cfg.aiKey;
   if (cfg.aiModel) $('cfg-ai-model').value = cfg.aiModel;
   if (cfg.brief)   $('brief-filename').textContent = cfg.briefName || '已上传';
+  syncAiModeUI();
 }
+
+$('cfg-ai-mode').addEventListener('change', syncAiModeUI);
 
 // ── 网站资料 txt 上传 ──────────────────────────────────────────────────────────
 $('btn-upload-brief').addEventListener('click', () => $('file-brief').click());
@@ -717,24 +814,121 @@ const logAI = (m, t) => log('log-ai-submit', m, t);
 // CSV 导入的域名列表（优先级高于交叉分析结果）
 let csvImportedDomains = [];
 
-function parseCsvDomains(text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  return lines
-    .filter(l => !l.startsWith('域名') && !l.startsWith('domain'))
-    .map(l => l.split(',')[0].trim().replace(/^"|"$/g, ''))
-    .filter(d => d && d.includes('.'));
+function normalizeImportedDomain(raw) {
+  if (!raw) return null;
+  let value = String(raw).trim().replace(/^\uFEFF/, '').replace(/^"|"$/g, '');
+  if (!value) return null;
+  if (/^mailto:/i.test(value) || value.includes('@')) return null;
+
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      value = new URL(value).hostname;
+    }
+  } catch {
+    return null;
+  }
+
+  value = value
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split(/[/?#]/)[0]
+    .replace(/:\d+$/, '')
+    .trim()
+    .toLowerCase();
+
+  if (!value || value.length > 253) return null;
+  if (!/^[a-z0-9.-]+$/.test(value)) return null;
+  if (!value.includes('.') || value.includes('..')) return null;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(value)) return null;
+
+  const labels = value.split('.');
+  const tld = labels[labels.length - 1];
+  if (!/^[a-z]{2,63}$/.test(tld)) return null;
+  if (labels.some(label => !label || label.startsWith('-') || label.endsWith('-') || label.length > 63)) return null;
+
+  return value;
 }
 
-function loadCsvFile(file) {
-  const reader = new FileReader();
-  reader.onload = (ev) => {
-    const domains = parseCsvDomains(ev.target.result);
+function extractDomainsFromText(text) {
+  const domains = new Set();
+  const parts = String(text || '')
+    .replace(/\u0000/g, ' ')
+    .split(/[\s,;|]+/);
+
+  for (const part of parts) {
+    const domain = normalizeImportedDomain(part);
+    if (domain) domains.add(domain);
+  }
+
+  return [...domains];
+}
+
+function extractDomainsFromRows(rows) {
+  const domains = new Set();
+  for (const row of rows || []) {
+    const values = Array.isArray(row) ? row : Object.values(row || {});
+    for (const value of values) {
+      for (const domain of extractDomainsFromText(value)) {
+        domains.add(domain);
+      }
+    }
+  }
+  return [...domains];
+}
+
+function decodeImportBuffer(buf) {
+  const tryLabels = ['utf-8', 'gb18030'];
+  for (const label of tryLabels) {
+    try {
+      const text = new TextDecoder(label).decode(buf);
+      if (text && text.trim()) return text;
+    } catch {}
+  }
+  return new TextDecoder().decode(buf);
+}
+
+async function parseImportedDomainFile(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  const isZip = bytes[0] === 0x50 && bytes[1] === 0x4B;
+  const isExcel = ['xlsx', 'xls'].includes(ext) || isZip;
+
+  if (isExcel) {
+    try {
+      const wb = XLSX.read(buf, { type: 'array' });
+      const domains = new Set();
+      for (const sheetName of wb.SheetNames) {
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        for (const domain of extractDomainsFromRows(rows)) domains.add(domain);
+      }
+      const parsed = [...domains];
+      if (!parsed.length) throw new Error('Excel 中未解析到域名');
+      return parsed;
+    } catch (e) {
+      throw new Error(`Excel 解析失败: ${e.message}`);
+    }
+  }
+
+  const parsed = extractDomainsFromText(decodeImportBuffer(buf));
+  if (!parsed.length) throw new Error('文本中未解析到域名');
+  return parsed;
+}
+
+async function loadCsvFile(file) {
+  try {
+    const domains = await parseImportedDomainFile(file);
     csvImportedDomains = domains;
     $('csv-domain-count').textContent = `✓ 已导入 ${domains.length} 个域名`;
     $('csv-drop-zone').classList.remove('drag-over');
-    logAI(`✓ 导入 CSV：${domains.length} 个域名`, 'ok');
-  };
-  reader.readAsText(file, 'utf-8');
+    logAI(`✓ 导入 ${file.name}：${domains.length} 个域名`, 'ok');
+  } catch (e) {
+    csvImportedDomains = [];
+    $('csv-domain-count').textContent = '导入失败';
+    $('csv-drop-zone').classList.remove('drag-over');
+    logAI(`✗ 导入失败：${e.message}`, 'err');
+  }
 }
 
 // 点击选择文件
@@ -768,8 +962,10 @@ $('btn-ai-submit').addEventListener('click', async () => {
   }
 
   const cfg = await getConfig();
-  if (!cfg.aiUrl || !cfg.aiKey || !cfg.aiModel) {
-    logAI('请先在「配置」标签填写 AI 中转站信息', 'err'); return;
+  const aiConfig = buildAiConfigFromValues(cfg);
+  const aiValidationError = getAiValidationError(aiConfig);
+  if (aiValidationError) {
+    logAI(aiValidationError, 'err'); return;
   }
   if (!cfg.brief) {
     logAI('请先在「配置」标签上传网站资料 txt', 'err'); return;
@@ -779,15 +975,19 @@ $('btn-ai-submit').addEventListener('click', async () => {
   const SKIP_HOSTS = ['yahoo.com','google.','bing.com','baidu.com','facebook.com',
     'twitter.com','instagram.com','youtube.com','linkedin.com','reddit.com',
     'wikipedia.org','amazon.com','apple.com','microsoft.com'];
-  const filtered = domains.filter(d => !SKIP_HOSTS.some(h => d.includes(h)));
-  if (filtered.length < domains.length) {
-    logAI(`过滤掉 ${domains.length - filtered.length} 个无效域名，剩余 ${filtered.length} 个`, 'info');
+  const normalized = [...new Set(domains.map(normalizeImportedDomain).filter(Boolean))];
+  if (normalized.length < domains.length) {
+    logAI(`已丢弃 ${domains.length - normalized.length} 个脏域名`, 'info');
+  }
+  const filtered = normalized.filter(d => !SKIP_HOSTS.some(h => d.includes(h)));
+  if (filtered.length < normalized.length) {
+    logAI(`过滤掉 ${normalized.length - filtered.length} 个无效域名，剩余 ${filtered.length} 个`, 'info');
   }
   if (!filtered.length) { logAI('过滤后没有可用域名', 'err'); return; }
 
   $('btn-ai-submit').disabled = true;
   $('btn-ai-stop').disabled = false;
-  $('log-ai-submit').innerHTML = '';
+  clearLogHistory('log-ai-submit');
   logAI(`准备处理 ${filtered.length} 个域名，正在启动...`, 'info');
 
   try {
@@ -795,7 +995,7 @@ $('btn-ai-submit').addEventListener('click', async () => {
       action: 'startCsvSubmit',
       domains: filtered,
       config: { author: cfg.author || '', brief: cfg.brief },
-      aiConfig: { url: cfg.aiUrl, key: cfg.aiKey, model: cfg.aiModel },
+      aiConfig,
     });
     if (!res?.ok) {
       logAI(`启动失败: ${res?.error || '后台未响应，请重新加载扩展'}`, 'err');
@@ -827,6 +1027,30 @@ $('btn-export-ai-log').addEventListener('click', async () => {
   a.click();
   URL.revokeObjectURL(url);
   setStatus(`✓ 已导出 ${entries.length} 条日志`);
+});
+
+$('btn-copy-ai-log').addEventListener('click', async () => {
+  const stored = await new Promise(r => chrome.storage.local.get('logAiSubmit', r));
+  const entries = stored.logAiSubmit || [];
+  if (!entries.length) { setStatus('没有日志可复制'); return; }
+  const text = entries.map(e => e.text).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`✓ 已复制 ${entries.length} 条日志`);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    setStatus(`✓ 已复制 ${entries.length} 条日志`);
+  }
+});
+
+$('btn-clear-ai-log').addEventListener('click', () => {
+  clearLogHistory('log-ai-submit');
+  setStatus('✓ 已清空 AI 日志');
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -911,7 +1135,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     $('btn-ai-stop').disabled = false;
     setGlobalStop(true);
     // 切换到交叉分析 tab 让用户看到日志
-    logAI('AI 提交任务后台运行中，点击「停止任务」可中止', 'info');
+    logAI('半自动提交流程后台运行中，点击「停止任务」可中止', 'info');
   }
 
   // 批量导出完成时 popup 未打开 → 打开后提示，不自动触发（避免用户困惑）

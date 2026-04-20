@@ -288,22 +288,24 @@ body {
     <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="analyze-hint">加载 2 个以上文件后开始分析</div>
   </div>
   <div class="section" id="section-ai-submit">
-    <div class="section-title">AI 辅助提交</div>
+    <div class="section-title">半自动提交</div>
     <div class="drop-zone" id="csv-drop-zone" style="padding:14px 12px">
       <div class="dz-icon" style="font-size:22px;margin-bottom:4px">📄</div>
       <strong style="font-size:12px">拖入交叉分析 CSV 文件</strong>
       <span>或点击选择文件</span>
-      <input type="file" id="file-csv-import" accept=".csv" style="display:none">
+      <input type="file" id="file-csv-import" accept=".csv,.txt,.xlsx,.xls" style="display:none">
     </div>
     <div style="font-size:11px;color:#6b7280;margin-top:6px" id="csv-domain-count">未导入（也可用下方交叉分析结果）</div>
     <div class="btn-row" style="margin-top:8px">
-      <button class="btn btn-success" id="btn-ai-submit">开始 AI 辅助</button>
+      <button class="btn btn-success" id="btn-ai-submit">开始半自动</button>
       <button class="btn btn-danger" id="btn-ai-stop" disabled>停止</button>
     </div>
-    <div style="margin-top:6px">
-      <button class="btn btn-gray btn-block" id="btn-export-ai-log">导出日志 TXT</button>
+    <div class="btn-row-3" style="margin-top:6px">
+      <button class="btn btn-gray" id="btn-export-ai-log">导出日志</button>
+      <button class="btn btn-gray" id="btn-copy-ai-log">复制日志</button>
+      <button class="btn btn-gray" id="btn-clear-ai-log">清空日志</button>
     </div>
-    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="ai-submit-hint">AI自动填表，你手动提交，点页面悬浮按钮进入下一个</div>
+    <div style="font-size:10px;color:#94a3b8;margin-top:6px" id="ai-submit-hint">自动识别入口、自动进登录页或提交页、自动填表；你负责登录、验证码和最终提交</div>
     <div class="log-box" id="log-ai-submit" style="margin-top:8px;height:100px"></div>
   </div>
   <div class="section" style="padding:0">
@@ -340,15 +342,30 @@ body {
   <div class="section">
     <div class="section-title">AI 自动填表</div>
     <div class="form-row">
+      <label>AI 模式</label>
+      <select id="cfg-ai-mode">
+        <option value="local-codex">本机 Codex</option>
+        <option value="local-claude">本机 Claude</option>
+        <option value="custom">自定义 OpenAI 兼容 API</option>
+      </select>
+    </div>
+    <div class="form-row" id="cfg-ai-bridge-row">
+      <label>本机桥接地址 <span style="color:#9ca3af;font-weight:400">（先运行 start-local-ai-bridge.cmd）</span></label>
+      <input type="text" id="cfg-ai-bridge-url" placeholder="http://127.0.0.1:8765">
+    </div>
+    <div class="hint" id="ai-mode-hint" style="margin-top:-2px">
+      本机模式会直接复用当前机器里的 Codex 或 Claude 登录态。
+    </div>
+    <div class="form-row" id="cfg-ai-url-row">
       <label>中转站 API URL</label>
       <input type="text" id="cfg-ai-url" placeholder="https://api.openai.com/v1">
     </div>
-    <div class="form-row">
+    <div class="form-row" id="cfg-ai-key-row">
       <label>API 密钥</label>
       <input type="password" id="cfg-ai-key" placeholder="sk-...">
     </div>
-    <div class="form-row">
-      <label>模型 <span style="color:#9ca3af;font-weight:400">（Claude: claude-sonnet-4-6 / GPT: gpt-4o）</span></label>
+    <div class="form-row" id="cfg-ai-model-row">
+      <label><span id="cfg-ai-model-label">模型</span> <span id="cfg-ai-model-hint" style="color:#9ca3af;font-weight:400">（Claude: claude-sonnet-4-6 / GPT: gpt-4o）</span></label>
       <input type="text" id="cfg-ai-model" placeholder="claude-sonnet-4-6">
     </div>
     <div class="btn-row" style="margin-top:8px">

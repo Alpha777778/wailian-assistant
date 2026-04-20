@@ -33,13 +33,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'getAiStatus') {
-    sendResponse({ running: aiRunning });
+    sendResponse({ running: aiRunning || csvRunning });
     return;
   }
 
   if (msg.action === 'testAiConfig') {
+    const aiConfig = msg.aiConfig || { url: msg.url, key: msg.key, model: msg.model, mode: 'custom' };
     callAI(
-      { url: msg.url, key: msg.key, model: msg.model },
+      aiConfig,
       '你是助手，简短回复。',
       '回复"OK"两个字'
     )
@@ -93,6 +94,18 @@ async function startBatchExport(domains, semTabId, followOnly = true, activeOnly
   batchStop = false;
   let doneCount = 0;
   const analysisData = {}; // { competitorDomain: [referringDomain, ...] }
+
+  const sanitizedDomains = sanitizeDomainsForNavigation(domains);
+  if (sanitizedDomains.length < domains.length) {
+    notifyPopup({ type: 'log', msg: `过滤掉 ${domains.length - sanitizedDomains.length} 个非法域名，剩余 ${sanitizedDomains.length} 个`, logType: 'info' });
+  }
+  domains = sanitizedDomains;
+  if (!domains.length) {
+    notifyPopup({ type: 'done', doneCount: 0, total: 0, analysisData: {} });
+    chrome.storage.local.set({ batchState: { running: false, domains: [], current: 0, done: 0, total: 0 } });
+    batchRunning = false;
+    return;
+  }
 
   chrome.storage.local.set({ batchState: { running: true, domains, current: 0, done: 0, total: domains.length } });
 
@@ -488,7 +501,7 @@ let aiStop = false;
 
 const SYSTEM_ANALYZE = `你是外链提交专家。目标是在各类平台上提交/发布内容，为网站获取外链。分析网页HTML，结合网站资料，返回JSON操作指令。
 返回纯JSON（不加markdown代码块）：
-{"form_type":"wp_comment|forum_reply|product_submit|directory_submit|review|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"skip_reason":null}
+{"page_stage":"landing|auth_gate|login|submit_form|comment_form|review_form|other","form_type":"wp_comment|forum_reply|product_submit|directory_submit|review|profile|other","site_url":"从资料中选最合适的落地页URL","navigate_to":null,"fields":[{"selector":"CSS选择器","value":"填写内容","method":"fill|pressSequentially|select|click|radio|checkbox"}],"submit_selector":"提交按钮CSS选择器","has_captcha":false,"requires_login":false,"skip_reason":null}
 
 平台识别规则：
 【Product Hunt / 产品提交平台】
@@ -547,11 +560,413 @@ function randomEmail(name) {
   return `${base}+${num}@gmail.com`;
 }
 
+const AUTH_TEXT_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|create an account|join|my account|continue with|google account|登录|登入|注册|账号|账户)/i;
+const SUBMIT_ENTRY_TEXT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
+const IRRELEVANT_ACTION_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
+
+function uniqueStrings(values = []) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function hostFromUrl(raw) {
+  try {
+    return new URL(raw).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function normalizeUrl(raw, base) {
+  if (!raw) return null;
+  try {
+    return new URL(raw, base).toString();
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_LOCAL_BRIDGE_URL = 'http://127.0.0.1:8765';
+
+function normalizeNavigableDomain(raw) {
+  if (!raw) return null;
+  let value = String(raw).trim().replace(/^\uFEFF/, '').replace(/^"|"$/g, '');
+  if (!value) return null;
+  if (/^mailto:/i.test(value) || value.includes('@')) return null;
+
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      value = new URL(value).hostname;
+    }
+  } catch {
+    return null;
+  }
+
+  value = value
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .split(/[/?#]/)[0]
+    .replace(/:\d+$/, '')
+    .trim()
+    .toLowerCase();
+
+  if (!value || value.length > 253) return null;
+  if (!/^[a-z0-9.-]+$/.test(value)) return null;
+  if (!value.includes('.') || value.includes('..')) return null;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(value)) return null;
+
+  const labels = value.split('.');
+  const tld = labels[labels.length - 1];
+  if (!/^[a-z]{2,63}$/.test(tld)) return null;
+  if (labels.some(label => !label || label.startsWith('-') || label.endsWith('-') || label.length > 63)) return null;
+
+  return value;
+}
+
+function sanitizeDomainsForNavigation(domains = []) {
+  const seen = new Set();
+  const sanitized = [];
+  for (const raw of domains) {
+    const domain = normalizeNavigableDomain(raw);
+    if (!domain || seen.has(domain)) continue;
+    seen.add(domain);
+    sanitized.push(domain);
+  }
+  return sanitized;
+}
+
+function isLoginPage(signals, instructions, skipReason = '') {
+  const reason = `${skipReason || ''} ${instructions?.page_stage || ''}`.toLowerCase();
+  return !!(
+    signals?.hasPasswordForm ||
+    signals?.pageStage === 'login' ||
+    instructions?.requires_login === true ||
+    /login|sign.?in|register|account|登录|注册|账号/.test(reason)
+  );
+}
+
+function hasActionableForm(signals) {
+  return !!signals?.hasFillableForm;
+}
+
+function scoreActionCandidate(candidate, currentUrl) {
+  const text = `${candidate.text || ''} ${candidate.href || ''}`.toLowerCase();
+  let score = candidate.kind === 'submit' ? 80 : 30;
+  if (SUBMIT_ENTRY_TEXT_RE.test(text)) score += 25;
+  if (AUTH_TEXT_RE.test(text)) score += 10;
+  if (/comment|reply|review/.test(text)) score += 15;
+  if (/submit|add|list|launch|claim|directory/.test(text)) score += 12;
+  if (/product|tool|startup|website|site/.test(text)) score += 8;
+  if (IRRELEVANT_ACTION_RE.test(text)) score -= 120;
+  if (candidate.href && hostFromUrl(candidate.href) === hostFromUrl(currentUrl)) score += 6;
+  return score;
+}
+
+function pickBestActionCandidate(signals) {
+  const candidates = (signals?.actionCandidates || [])
+    .filter(c => c && (c.kind === 'submit' || c.kind === 'auth'))
+    .map(c => ({ ...c, score: scoreActionCandidate(c, signals.url) }))
+    .sort((a, b) => b.score - a.score);
+
+  return candidates[0] || null;
+}
+
+async function openActionCandidate(tabId, candidate) {
+  if (!candidate) return false;
+
+  if (candidate.href && /^https?:/i.test(candidate.href)) {
+    await chrome.tabs.update(tabId, { url: candidate.href, active: true });
+    return true;
+  }
+
+  const clickRes = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (cand) => {
+      const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const clickable = Array.from(document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"]'));
+      const target = clickable.find(el => {
+        const text = normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+        const href = el.tagName === 'A' ? el.href : null;
+        if (cand.href && href === cand.href) return true;
+        if (cand.text && text === cand.textNormalized) return true;
+        return false;
+      });
+
+      if (target) {
+        target.click();
+        return true;
+      }
+
+      if (cand.selector) {
+        const bySelector = document.querySelector(cand.selector);
+        if (bySelector) {
+          bySelector.click();
+          return true;
+        }
+      }
+
+      return false;
+    },
+    args: [{
+      text: candidate.text || '',
+      textNormalized: (candidate.text || '').replace(/\s+/g, ' ').trim().toLowerCase(),
+      href: candidate.href || null,
+      selector: candidate.selector || null,
+    }],
+  }).catch(() => [{ result: false }]);
+
+  return !!clickRes[0]?.result;
+}
+
+async function extractPageSignals(tabId) {
+  const res = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const AUTH_RE = /(log[\s-]?in|sign[\s-]?in|sign[\s-]?up|register|create account|join|my account|continue with|google account|登录|注册|账号|账户)/i;
+      const SUBMIT_RE = /(submit|add tool|add product|list your product|list product|get listed|launch|write a review|leave a review|review this|submit your tool|submit your product|submit your site|add listing|claim listing|comment|reply|leave a reply|post your product|share your startup|directory|listing)/i;
+      const NOISE_RE = /(privacy|terms|policy|cookie|help|docs?|documentation|pricing|about|contact|learn more|read more|logout|log out|forgot password|reset password)/i;
+
+      const normalize = (text) => (text || '').replace(/\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el) return false;
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+      };
+
+      const cssEscape = (value) => {
+        if (window.CSS?.escape) return window.CSS.escape(value);
+        return String(value).replace(/["\\#.:>+~*^$|=,[\\]()]/g, '\\$&');
+      };
+
+      const getSelector = (el) => {
+        if (!el) return null;
+        if (el.id) return `#${cssEscape(el.id)}`;
+        const tag = el.tagName.toLowerCase();
+        const name = el.getAttribute('name');
+        const type = el.getAttribute('type');
+        if (name) return `${tag}[name="${String(name).replace(/"/g, '\\"')}"]`;
+        if (type) return `${tag}[type="${String(type).replace(/"/g, '\\"')}"]`;
+        if (el.getAttribute('data-testid')) return `${tag}[data-testid="${String(el.getAttribute('data-testid')).replace(/"/g, '\\"')}"]`;
+        return tag;
+      };
+
+      const getFieldLabel = (el) => {
+        const aria = el.getAttribute('aria-label');
+        if (aria) return normalize(aria);
+        const placeholder = el.getAttribute('placeholder');
+        if (placeholder) return normalize(placeholder);
+        const label = el.id ? document.querySelector(`label[for="${cssEscape(el.id)}"]`) : null;
+        if (label) return normalize(label.textContent);
+        const wrap = el.closest('label');
+        if (wrap) return normalize(wrap.textContent);
+        return '';
+      };
+
+      const forms = Array.from(document.querySelectorAll('form')).map(form => {
+        const fields = Array.from(form.querySelectorAll('input, textarea, select')).map(el => ({
+          selector: getSelector(el),
+          tag: el.tagName.toLowerCase(),
+          type: (el.getAttribute('type') || el.tagName || '').toLowerCase(),
+          name: el.getAttribute('name') || '',
+          label: getFieldLabel(el),
+          required: el.required || el.getAttribute('aria-required') === 'true',
+        }));
+        return {
+          selector: getSelector(form),
+          action: form.getAttribute('action') || '',
+          method: (form.getAttribute('method') || 'get').toLowerCase(),
+          fieldCount: fields.length,
+          hasPassword: fields.some(f => f.type === 'password'),
+          hasTextarea: fields.some(f => f.tag === 'textarea'),
+          hasFileInput: fields.some(f => f.type === 'file'),
+          fields: fields.slice(0, 16),
+          html: form.outerHTML.slice(0, 4000),
+        };
+      }).slice(0, 8);
+
+      const actionCandidates = [];
+      const seen = new Set();
+      for (const el of Array.from(document.querySelectorAll('a[href], button, [role="button"], input[type="submit"], input[type="button"]'))) {
+        if (!isVisible(el)) continue;
+        const text = normalize(el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || '');
+        if (!text || text.length > 120) continue;
+        const href = el.tagName === 'A'
+          ? (() => { try { return new URL(el.getAttribute('href') || el.href, location.href).toString(); } catch { return null; } })()
+          : null;
+        const haystack = `${text} ${href || ''}`.toLowerCase();
+        if (NOISE_RE.test(haystack)) continue;
+        let kind = null;
+        if (SUBMIT_RE.test(haystack)) kind = 'submit';
+        else if (AUTH_RE.test(haystack)) kind = 'auth';
+        if (!kind) continue;
+        const key = `${kind}::${text}::${href || ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        actionCandidates.push({
+          kind,
+          text,
+          href,
+          selector: getSelector(el),
+          tag: el.tagName.toLowerCase(),
+        });
+      }
+
+      const hasPasswordForm = forms.some(form => form.hasPassword) || !!document.querySelector('input[type="password"]');
+      const hasFillableForm = forms.some(form => !form.hasPassword && form.fieldCount > 0 && (form.hasTextarea || form.fields.some(f => !['hidden', 'submit', 'button'].includes(f.type))));
+      const textLower = document.body.innerText.toLowerCase();
+      const htmlLower = document.documentElement.outerHTML.toLowerCase();
+      const hasCaptcha = /(captcha|recaptcha|hcaptcha|turnstile)/i.test(textLower) || /(captcha|recaptcha|hcaptcha|turnstile)/i.test(htmlLower);
+      const headings = Array.from(document.querySelectorAll('h1, h2, h3')).map(el => normalize(el.textContent)).filter(Boolean).slice(0, 10);
+
+      let pageStage = 'unknown';
+      if (hasPasswordForm) pageStage = 'login';
+      else if (hasFillableForm) pageStage = 'form';
+      else if (actionCandidates.some(item => item.kind === 'submit')) pageStage = 'entry';
+      else if (actionCandidates.some(item => item.kind === 'auth')) pageStage = 'auth_gate';
+
+      const snippetParts = [
+        `<title>${document.title}</title>`,
+        headings.map(text => `<h>${text}</h>`).join('\n'),
+        forms.map(form => form.html).join('\n\n'),
+        actionCandidates.slice(0, 12).map(item => `ACTION ${item.kind}: ${item.text} ${item.href || ''}`).join('\n'),
+        document.body.innerText.slice(0, 3000),
+      ].filter(Boolean);
+
+      return {
+        url: location.href,
+        title: document.title,
+        pageStage,
+        hasPasswordForm,
+        hasFillableForm,
+        hasCaptcha,
+        headings,
+        forms,
+        actionCandidates: actionCandidates.slice(0, 20),
+        htmlSnippet: snippetParts.join('\n\n').slice(0, 18000),
+      };
+    },
+  }).catch(() => [{ result: null }]);
+
+  return res[0]?.result || null;
+}
+
+function buildAnalyzePrompt(config, name, email, signals) {
+  const safeSignals = {
+    url: signals?.url || '',
+    title: signals?.title || '',
+    pageStage: signals?.pageStage || 'unknown',
+    hasPasswordForm: !!signals?.hasPasswordForm,
+    hasFillableForm: !!signals?.hasFillableForm,
+    hasCaptcha: !!signals?.hasCaptcha,
+    headings: signals?.headings || [],
+    forms: (signals?.forms || []).map(form => ({
+      selector: form.selector,
+      action: form.action,
+      method: form.method,
+      fieldCount: form.fieldCount,
+      hasPassword: form.hasPassword,
+      hasTextarea: form.hasTextarea,
+      hasFileInput: form.hasFileInput,
+      fields: form.fields,
+    })),
+    actionCandidates: signals?.actionCandidates || [],
+  };
+
+  return `评论者信息：名字=${name} 邮箱=${email}\n\n网站资料：\n${config.brief}\n\n页面信号(JSON)：\n${JSON.stringify(safeSignals, null, 2)}\n\n页面片段HTML：\n${signals?.htmlSnippet || ''}`;
+}
+
+function parseAIInstructions(raw) {
+  if (!raw) throw new Error('AI 返回为空');
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('AI 返回格式错误');
+  }
+}
+
+async function analyzeSignalsWithAI(config, aiConfig, signals) {
+  const name = config.author || randomName();
+  const email = randomEmail(name);
+  const raw = await callAI(aiConfig, SYSTEM_ANALYZE, buildAnalyzePrompt(config, name, email, signals));
+  return parseAIInstructions(raw);
+}
+
+async function autoAdvanceToActionablePage(tabId, signals, onLog) {
+  let current = signals;
+  const visited = new Set([signals?.url || '']);
+
+  for (let hop = 0; hop < 3; hop++) {
+    if (!current || hasActionableForm(current) || current.hasPasswordForm) return current;
+
+    const candidate = pickBestActionCandidate(current);
+    if (!candidate) return current;
+
+    onLog?.(`  → 自动识别入口：${candidate.text || candidate.href || candidate.selector}`, 'info');
+    const moved = await openActionCandidate(tabId, candidate);
+    if (!moved) return current;
+
+    const timedOut = await waitForTabLoad(tabId, 20000);
+    await sleep(1800);
+    current = await extractPageSignals(tabId);
+
+    if (!current) return signals;
+    if (timedOut) return current;
+    if (visited.has(current.url)) return current;
+    visited.add(current.url);
+  }
+
+  return current;
+}
+
 function notifyAiProgress(data) {
   chrome.runtime.sendMessage({ action: 'aiSubmitProgress', ...data }).catch(() => {});
 }
 
-async function callAI(aiConfig, systemPrompt, userPrompt) {
+function normalizeAiConfig(aiConfig = {}) {
+  const hasCustomConfig = !!(aiConfig.url || aiConfig.key);
+  const mode = aiConfig.mode === 'custom' || aiConfig.mode === 'local-codex' || aiConfig.mode === 'local-claude'
+    ? aiConfig.mode
+    : hasCustomConfig
+      ? 'custom'
+      : (aiConfig.provider === 'claude' ? 'local-claude' : 'local-codex');
+  const provider = aiConfig.provider || (mode === 'local-claude' ? 'claude' : 'codex');
+  return {
+    mode,
+    provider,
+    bridgeUrl: String(aiConfig.bridgeUrl || DEFAULT_LOCAL_BRIDGE_URL).trim() || DEFAULT_LOCAL_BRIDGE_URL,
+    url: String(aiConfig.url || '').trim(),
+    key: String(aiConfig.key || '').trim(),
+    model: String(aiConfig.model || '').trim(),
+  };
+}
+
+function buildLocalBridgeEndpoint(raw) {
+  let base = String(raw || DEFAULT_LOCAL_BRIDGE_URL).trim() || DEFAULT_LOCAL_BRIDGE_URL;
+  if (!/^https?:\/\//i.test(base)) base = `http://${base}`;
+  base = base.replace(/\/$/, '');
+  if (base.endsWith('/v1/chat/completions')) return base;
+  if (base.endsWith('/v1')) return `${base}/chat/completions`;
+  return `${base}/v1/chat/completions`;
+}
+
+function readChatMessageContent(content) {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map(part => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part.text === 'string') return part.text;
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+async function callOpenAiCompatible(aiConfig, systemPrompt, userPrompt) {
   const url = aiConfig.url.replace(/\/$/, '') + '/chat/completions';
   const resp = await fetch(url, {
     method: 'POST',
@@ -579,7 +994,50 @@ async function callAI(aiConfig, systemPrompt, userPrompt) {
     throw new Error(`返回非JSON（${ct || 'unknown'}）— URL 可能填错了。内容: ${body.slice(0, 80)}`);
   }
   const data = await resp.json();
-  return data.choices[0].message.content.trim();
+  const text = readChatMessageContent(data?.choices?.[0]?.message?.content);
+  if (!text) throw new Error('AI 返回为空');
+  return text;
+}
+
+async function callLocalBridge(aiConfig, systemPrompt, userPrompt) {
+  const url = buildLocalBridgeEndpoint(aiConfig.bridgeUrl);
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      provider: aiConfig.provider,
+      model: aiConfig.model || undefined,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.2,
+      max_tokens: 800,
+    })
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`本机桥接失败 ${resp.status}: ${body.slice(0, 160)}`);
+  }
+  const ct = resp.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    const body = await resp.text();
+    throw new Error(`本机桥接返回非JSON（${ct || 'unknown'}）: ${body.slice(0, 120)}`);
+  }
+  const data = await resp.json();
+  const text = readChatMessageContent(data?.choices?.[0]?.message?.content);
+  if (!text) throw new Error('本机桥接返回为空');
+  return text;
+}
+
+async function callAI(aiConfig, systemPrompt, userPrompt) {
+  const normalized = normalizeAiConfig(aiConfig);
+  if (normalized.mode === 'custom') {
+    return callOpenAiCompatible(normalized, systemPrompt, userPrompt);
+  }
+  return callLocalBridge(normalized, systemPrompt, userPrompt);
 }
 
 // 注入到目标页面：根据 AI 指令填表并提交
@@ -812,9 +1270,15 @@ async function execFillScript(tabId, instr) {
     func: (instr) => {
       const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
       const nativeTextareaSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+      const nativeSelectSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
       function setReactValue(el, text) {
         el.focus();
-        const setter = el.tagName === 'TEXTAREA' ? nativeTextareaSetter : nativeSetter;
+        const setter =
+          el.tagName === 'TEXTAREA'
+            ? nativeTextareaSetter
+            : el.tagName === 'SELECT'
+              ? nativeSelectSetter
+              : nativeSetter;
         if (setter) setter.call(el, text); else el.value = text;
         el.dispatchEvent(new Event('input',  { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -841,7 +1305,12 @@ async function execFillScript(tabId, instr) {
       for (const field of (instr.fields || [])) {
         const el = document.querySelector(field.selector);
         if (!el) continue;
+        el.scrollIntoView({ block: 'center', inline: 'center' });
         if (field.method === 'radio' || field.method === 'checkbox') {
+          el.click();
+        } else if (field.method === 'select' && el.tagName === 'SELECT') {
+          setReactValue(el, field.value);
+        } else if (field.method === 'click') {
           el.click();
         } else if (field.method === 'pressSequentially') {
           simulateTyping(el, field.value);
@@ -858,6 +1327,12 @@ async function csvSubmitLoop(domains, config, aiConfig) {
   csvRunning = true;
   csvStop = false;
 
+  const sanitizedDomains = sanitizeDomainsForNavigation(domains);
+  if (sanitizedDomains.length < domains.length) {
+    notifyCsv({ type: 'log', msg: `已丢弃 ${domains.length - sanitizedDomains.length} 个非法域名，剩余 ${sanitizedDomains.length} 个`, logType: 'info' });
+  }
+  domains = sanitizedDomains;
+
   // 过滤掉不应该提交外链的平台域名
   const SKIP_DOMAINS = /^(producthunt\.com|twitter\.com|x\.com|facebook\.com|instagram\.com|linkedin\.com|youtube\.com|tiktok\.com|reddit\.com|pinterest\.com|snapchat\.com|whatsapp\.com|telegram\.org|discord\.com|github\.com|google\.|bing\.com|yahoo\.com|baidu\.com|amazon\.com|apple\.com|microsoft\.com|cloudflare\.com|wordpress\.com|shopify\.com|medium\.com|substack\.com|quora\.com|stackoverflow\.com)$/i;
   const filtered = domains.filter(d => !SKIP_DOMAINS.test(d.replace(/^https?:\/\//, '').split('/')[0]));
@@ -865,6 +1340,11 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     notifyCsv({ type: 'log', msg: `过滤掉 ${domains.length - filtered.length} 个平台域名，剩余 ${filtered.length} 个`, logType: 'info' });
   }
   domains = filtered;
+  if (!domains.length) {
+    notifyCsv({ type: 'done', total: 0, msg: '没有可处理的域名' });
+    csvRunning = false;
+    return;
+  }
 
   let workerTab;
   try {
@@ -881,6 +1361,7 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
     const domain = domains[i];
     const url = /^https?:\/\//.test(domain) ? domain : `https://${domain}`;
+    const logStep = (msg, logType = 'info') => notifyCsv({ type: 'log', msg, logType });
     notifyCsv({ type: 'log', msg: `[${i+1}/${domains.length}] ${domain}`, logType: 'info' });
 
     // 导航
@@ -900,169 +1381,138 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       await waitForNext();
       continue;
     }
-    await sleep(1500);
+    await sleep(1200);
 
-    // 提取页面 HTML
-    notifyCsv({ type: 'log', msg: `  → 提取页面内容...`, logType: 'info' });
-    const htmlRes = await chrome.scripting.executeScript({
-      target: { tabId: workerTab.id },
-      func: () => new Promise(resolve => {
-        window.scrollTo(0, document.body.scrollHeight);
-        setTimeout(() => {
-          const parts = [`<title>${document.title}</title>`];
-          const desc = document.querySelector('meta[name="description"]');
-          if (desc) parts.push(desc.outerHTML);
-          for (const form of document.querySelectorAll('form')) {
-            parts.push(form.outerHTML.slice(0, 5000));
-          }
-          for (const sel of ['#comments','#respond','.comments-area','.comment-section','[id*="comment"]','[class*="comment"]']) {
-            const el = document.querySelector(sel);
-            if (el) { parts.push(el.outerHTML.slice(0, 4000)); break; }
-          }
-          resolve(parts.join('\n\n').slice(0, 16000));
-        }, 1500);
-      }),
-    }).catch(() => [{ result: '' }]);
-    const html = htmlRes[0]?.result || '';
+    let signals = await extractPageSignals(workerTab.id);
+    if (!signals) {
+      logStep('  ✗ 页面信号提取失败', 'err');
+      await injectFloatingBtn(workerTab.id, '页面识别失败，点击跳过 →', i+1, domains.length, false);
+      await waitForNext();
+      continue;
+    }
 
-    // AI 分析
-    notifyCsv({ type: 'log', msg: `  → AI 分析中...`, logType: 'info' });
+    logStep(`  → 页面阶段: ${signals.pageStage}${signals.hasCaptcha ? ' / captcha' : ''}`, 'info');
+    signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+
     let instructions = null;
     let skipReason = null;
     let needsLogin = false;
 
-    try {
-      const name  = config.author || randomName();
-      const email = randomEmail(name);
-      const userPrompt = `评论者信息：名字=${name} 邮箱=${email}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html}`;
-      const raw = await callAI(aiConfig, SYSTEM_ANALYZE, userPrompt);
-      try { instructions = JSON.parse(raw); }
-      catch { const m = raw.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
+    const analyzeCurrentSignals = async () => {
+      instructions = await analyzeSignalsWithAI(config, aiConfig, signals);
+      skipReason = instructions?.skip_reason || null;
+      needsLogin = isLoginPage(signals, instructions, skipReason);
+    };
 
-      if (instructions?.skip_reason) {
-        skipReason = instructions.skip_reason;
-        needsLogin = /login|sign.?in|登录|注册|account/i.test(skipReason);
-      }
+    logStep('  → AI 分析页面结构...', 'info');
+    try {
+      await analyzeCurrentSignals();
     } catch (e) {
-      notifyCsv({ type: 'log', msg: `  ✗ AI分析失败: ${e.message}`, logType: 'err' });
+      logStep(`  ✗ AI分析失败: ${e.message}`, 'err');
       skipReason = 'AI分析失败';
     }
 
-    // 如果AI建议跳转子页（如Product Hunt提交页、论坛帖子等）
     if (instructions?.navigate_to && !instructions.skip_reason) {
-      const subUrl = instructions.navigate_to;
-      notifyCsv({ type: 'log', msg: `  → 跳转子页: ${subUrl}`, logType: 'info' });
-      await chrome.tabs.update(workerTab.id, { url: subUrl, active: true });
-      const t2 = await waitForTabLoad(workerTab.id, 30000);
-      if (t2) {
-        notifyCsv({ type: 'log', msg: `  ✗ 子页加载超时`, logType: 'err' });
-        await injectFloatingBtn(workerTab.id, '子页加载超时，点击跳过 →', i+1, domains.length, false);
-        await waitForNext();
-        continue;
-      }
-      await sleep(2000);
-      // 重新提取子页HTML并分析
-      const h2Res = await chrome.scripting.executeScript({
-        target: { tabId: workerTab.id },
-        func: () => new Promise(resolve => {
-          window.scrollTo(0, document.body.scrollHeight);
-          setTimeout(() => {
-            const parts = [`<title>${document.title}</title>`];
-            for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 5000));
-            for (const sel of ['[class*="comment"]','[class*="reply"]','[class*="submit"]','[class*="form"]','textarea','input[type=text]']) {
-              const el = document.querySelector(sel);
-              if (el) { parts.push(el.closest('form,section,div')?.outerHTML?.slice(0,4000) || ''); break; }
-            }
-            resolve(parts.join('\n\n').slice(0, 16000));
-          }, 2000);
-        }),
-      }).catch(() => [{ result: '' }]);
-      const html2 = h2Res[0]?.result || '';
-      notifyCsv({ type: 'log', msg: `  → 子页AI分析中...`, logType: 'info' });
-      try {
-        const name2 = config.author || randomName();
-        const email2 = randomEmail(name2);
-        const raw2 = await callAI(aiConfig, SYSTEM_ANALYZE,
-          `评论者信息：名字=${name2} 邮箱=${email2}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html2}`);
-        try { instructions = JSON.parse(raw2); }
-        catch { const m = raw2.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
-        skipReason = instructions?.skip_reason || null;
-        needsLogin = skipReason ? /login|sign.?in|登录|注册|account/i.test(skipReason) : false;
-      } catch (e) {
-        skipReason = 'AI子页分析失败';
+      const subUrl = normalizeUrl(instructions.navigate_to, signals.url);
+      if (subUrl) {
+        logStep(`  → 跳转子页: ${subUrl}`, 'info');
+        await chrome.tabs.update(workerTab.id, { url: subUrl, active: true });
+        const subTimedOut = await waitForTabLoad(workerTab.id, 30000);
+        if (subTimedOut) {
+          logStep('  ✗ 子页加载超时', 'err');
+          await injectFloatingBtn(workerTab.id, '子页加载超时，点击跳过 →', i+1, domains.length, false);
+          await waitForNext();
+          continue;
+        }
+        await sleep(1800);
+        signals = await extractPageSignals(workerTab.id);
+        signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+        try {
+          await analyzeCurrentSignals();
+        } catch (e) {
+          logStep(`  ✗ 子页AI分析失败: ${e.message}`, 'err');
+          skipReason = 'AI子页分析失败';
+        }
       }
     }
 
     if (needsLogin) {
-      notifyCsv({ type: 'log', msg: `  ⚠ 需要登录，等待你操作...`, logType: 'info' });
-      await injectFloatingBtn(workerTab.id, '需要登录，请登录后点击继续 →', i+1, domains.length, false);
+      logStep('  ⚠ 检测到登录页，等待你登录后继续', 'info');
+      await injectFloatingBtn(workerTab.id, '检测到登录页，请登录后点击继续 →', i+1, domains.length, false);
       await waitForNext();
       if (csvStop) break;
-      // 登录后重新分析
-      notifyCsv({ type: 'log', msg: `  → 登录后重新分析...`, logType: 'info' });
-      const html2Res = await chrome.scripting.executeScript({
-        target: { tabId: workerTab.id },
-        func: () => new Promise(resolve => {
-          window.scrollTo(0, document.body.scrollHeight);
-          setTimeout(() => {
-            const parts = [`<title>${document.title}</title>`];
-            for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 5000));
-            resolve(parts.join('\n\n').slice(0, 16000));
-          }, 1500);
-        }),
-      }).catch(() => [{ result: '' }]);
-      const html2 = html2Res[0]?.result || '';
+
+      signals = await extractPageSignals(workerTab.id);
+      signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
+
       try {
-        const name2  = config.author || randomName();
-        const email2 = randomEmail(name2);
-        const raw2 = await callAI(aiConfig, SYSTEM_ANALYZE,
-          `评论者信息：名字=${name2} 邮箱=${email2}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html2}`);
-        try { instructions = JSON.parse(raw2); }
-        catch { const m = raw2.match(/\{[\s\S]*\}/); if (m) instructions = JSON.parse(m[0]); }
-        skipReason = instructions?.skip_reason || null;
+        logStep('  → 登录后重新分析页面...', 'info');
+        await analyzeCurrentSignals();
       } catch (e) {
-        skipReason = 'AI重新分析失败';
+        logStep(`  ✗ 登录后分析失败: ${e.message}`, 'err');
+        skipReason = '登录后分析失败';
+      }
+
+      if (isLoginPage(signals, instructions, skipReason)) {
+        skipReason = '登录后仍停留在登录页';
+        needsLogin = true;
       }
     }
 
-    if (skipReason && !needsLogin) {
-      notifyCsv({ type: 'log', msg: `  ⊘ 跳过: ${skipReason}`, logType: 'info' });
+    if (skipReason && !hasActionableForm(signals) && !needsLogin) {
+      logStep(`  ⊘ 跳过: ${skipReason}`, 'info');
       await injectFloatingBtn(workerTab.id, `跳过: ${skipReason}`, i+1, domains.length, false);
       await waitForNext();
       continue;
     }
 
-    // 通用多步填表循环（最多6步，支持任意网站的多步流程）
+    if (needsLogin) {
+      await injectFloatingBtn(workerTab.id, '仍在登录页，点击跳过 →', i+1, domains.length, false);
+      await waitForNext();
+      continue;
+    }
+
     if (instructions && !instructions.skip_reason) {
       let stepInstr = instructions;
       let stepNum = 0;
       const MAX_STEPS = 6;
-
       let autoSkipped = false;
+
       while (stepInstr && !stepInstr.skip_reason && stepNum < MAX_STEPS) {
         stepNum++;
-        // 净化 URL 双重协议
         for (const f of (stepInstr.fields || [])) {
           if (f.value) f.value = f.value.replace(/^(https?:\/\/){2,}/, 'https://');
         }
-        const fc = stepInstr.fields?.length || 0;
+
+        const fieldCount = stepInstr.fields?.length || 0;
         const hasAutoClick = !!stepInstr.auto_click;
-        notifyCsv({ type: 'log', msg: `  ✓ 步骤${stepNum}: ${stepInstr.form_type}，${fc}个字段${hasAutoClick ? '，自动继续' : ''}`, logType: 'ok' });
+        logStep(`  ✓ 步骤${stepNum}: ${stepInstr.form_type}，${fieldCount}个字段${hasAutoClick ? '，自动继续' : ''}`, 'ok');
 
         await execFillScript(workerTab.id, stepInstr);
 
         if (stepInstr.done === false && hasAutoClick) {
-          // 自动点击继续按钮，进入下一步
           await chrome.scripting.executeScript({
             target: { tabId: workerTab.id },
-            func: (sel) => { const el = document.querySelector(sel); if (el) el.click(); },
+            func: (selector) => {
+              const el = document.querySelector(selector);
+              if (el) el.click();
+            },
             args: [stepInstr.auto_click],
           }).catch(() => {});
-          const waitMs = stepInstr.wait_ms || 2000;
-          await sleep(waitMs);
+
+          await sleep(stepInstr.wait_ms || 2000);
           await waitForTabLoad(workerTab.id, 15000);
           await sleep(1500);
-          // 检测页面是否出现错误提示（如"already associated"、"already exists"等）
+
+          signals = await extractPageSignals(workerTab.id);
+          if (isLoginPage(signals, null, '')) {
+            logStep('  ⚠ 中间步骤进入登录页，等你登录后继续', 'info');
+            await injectFloatingBtn(workerTab.id, '中间步骤进入登录页，请登录后点击继续 →', i+1, domains.length, false);
+            await waitForNext();
+            if (csvStop) break;
+            signals = await extractPageSignals(workerTab.id);
+          }
+
           const errCheck = await chrome.scripting.executeScript({
             target: { tabId: workerTab.id },
             func: () => {
@@ -1072,50 +1522,42 @@ async function csvSubmitLoop(domains, config, aiConfig) {
                 /already listed/i, /duplicate/i, /this url is already/i,
                 /product already/i, /reach out to us/i,
               ];
-              for (const p of errPatterns) { if (p.test(body)) return body.slice(0, 200); }
+              for (const pattern of errPatterns) {
+                if (pattern.test(body)) return body.slice(0, 200);
+              }
               return null;
             },
           }).catch(() => [{ result: null }]);
+
           const errText = errCheck[0]?.result;
           if (errText) {
-            notifyCsv({ type: 'log', msg: `  ⊘ 页面错误，自动跳过: ${errText.slice(0,80)}`, logType: 'info' });
+            logStep(`  ⊘ 页面报错，自动跳过: ${errText.slice(0, 80)}`, 'info');
             autoSkipped = true;
             break;
           }
-          // 重新提取页面并分析
-          const hRes = await chrome.scripting.executeScript({
-            target: { tabId: workerTab.id },
-            func: () => {
-              const parts = [`<title>${document.title}</title>`];
-              for (const form of document.querySelectorAll('form')) parts.push(form.outerHTML.slice(0, 5000));
-              for (const sel of ['[class*="submit"]','[class*="form"]','textarea','input[type=text]','input[type=url]']) {
-                const el = document.querySelector(sel);
-                if (el) { parts.push(el.closest('form,section,div')?.outerHTML?.slice(0,4000) || ''); break; }
-              }
-              return parts.join('\n\n').slice(0, 16000);
-            },
-          }).catch(() => [{ result: '' }]);
-          const html = hRes[0]?.result || '';
+
           try {
-            const n = config.author || randomName();
-            const e = randomEmail(n);
-            const raw = await callAI(aiConfig, SYSTEM_ANALYZE,
-              `评论者信息：名字=${n} 邮箱=${e}\n\n网站资料：\n${config.brief}\n\n页面HTML：\n${html}`);
-            try { stepInstr = JSON.parse(raw); }
-            catch { const m = raw.match(/\{[\s\S]*\}/); if (m) stepInstr = JSON.parse(m[0]); else break; }
-          } catch (e2) {
-            notifyCsv({ type: 'log', msg: `  ✗ 步骤${stepNum+1}分析失败: ${e2.message}`, logType: 'err' });
+            stepInstr = await analyzeSignalsWithAI(config, aiConfig, signals);
+          } catch (e) {
+            logStep(`  ✗ 步骤${stepNum + 1}分析失败: ${e.message}`, 'err');
             break;
           }
         } else {
-          break; // done=true 或无 auto_click，等用户提交
+          break;
         }
       }
 
-      if (autoSkipped) continue; // 页面报错，直接跳下一个域名
-      await injectFloatingBtn(workerTab.id, '已填写表单，请手动提交后点击下一步 →', i+1, domains.length, true);
+      if (autoSkipped) continue;
+
+      const filledLabel = signals?.hasCaptcha || instructions?.has_captcha
+        ? '已填写表单，如有验证码请先处理，提交后点击下一步 →'
+        : '已填写表单，请手动提交后点击下一步 →';
+      await injectFloatingBtn(workerTab.id, filledLabel, i+1, domains.length, true);
+    } else if (hasActionableForm(signals)) {
+      logStep('  ⚠ 已识别到表单，当前等待你人工检查并提交', 'info');
+      await injectFloatingBtn(workerTab.id, '已识别到表单，请检查后提交，完成后点击下一步 →', i+1, domains.length, true);
     } else {
-      await injectFloatingBtn(workerTab.id, '未找到表单，点击跳过 →', i+1, domains.length, false);
+      await injectFloatingBtn(workerTab.id, '未识别到入口，点击跳过 →', i+1, domains.length, false);
     }
 
     // 等待用户点击悬浮按钮
