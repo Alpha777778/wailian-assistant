@@ -813,12 +813,22 @@ const logAI = (m, t) => log('log-ai-submit', m, t);
 
 // CSV 导入的域名列表（优先级高于交叉分析结果）
 let csvImportedDomains = [];
+const FILE_LIKE_EXTENSIONS = new Set(['xlsx', 'xls', 'csv', 'tsv', 'txt', 'json', 'xml', 'pdf', 'doc', 'docx']);
+
+function looksLikeFilename(raw) {
+  const value = String(raw || '').trim().toLowerCase();
+  if (!value || /^https?:\/\//i.test(value)) return false;
+  const basename = value.split(/[\\/]/).pop() || value;
+  const ext = basename.split('.').pop() || '';
+  return FILE_LIKE_EXTENSIONS.has(ext);
+}
 
 function normalizeImportedDomain(raw) {
   if (!raw) return null;
   let value = String(raw).trim().replace(/^\uFEFF/, '').replace(/^"|"$/g, '');
   if (!value) return null;
   if (/^mailto:/i.test(value) || value.includes('@')) return null;
+  if (looksLikeFilename(value)) return null;
 
   try {
     if (/^https?:\/\//i.test(value)) {

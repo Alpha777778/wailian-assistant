@@ -586,12 +586,22 @@ function normalizeUrl(raw, base) {
 }
 
 const DEFAULT_LOCAL_BRIDGE_URL = 'http://127.0.0.1:8765';
+const FILE_LIKE_EXTENSIONS = new Set(['xlsx', 'xls', 'csv', 'tsv', 'txt', 'json', 'xml', 'pdf', 'doc', 'docx']);
+
+function looksLikeFilename(raw) {
+  const value = String(raw || '').trim().toLowerCase();
+  if (!value || /^https?:\/\//i.test(value)) return false;
+  const basename = value.split(/[\\/]/).pop() || value;
+  const ext = basename.split('.').pop() || '';
+  return FILE_LIKE_EXTENSIONS.has(ext);
+}
 
 function normalizeNavigableDomain(raw) {
   if (!raw) return null;
   let value = String(raw).trim().replace(/^\uFEFF/, '').replace(/^"|"$/g, '');
   if (!value) return null;
   if (/^mailto:/i.test(value) || value.includes('@')) return null;
+  if (looksLikeFilename(value)) return null;
 
   try {
     if (/^https?:\/\//i.test(value)) {
@@ -908,7 +918,7 @@ async function autoAdvanceToActionablePage(tabId, signals, onLog) {
     if (!moved) return current;
 
     const timedOut = await waitForTabLoad(tabId, 20000);
-    await sleep(1800);
+    await sleep(900);
     current = await extractPageSignals(tabId);
 
     if (!current) return signals;
@@ -1019,7 +1029,12 @@ async function callLocalBridge(aiConfig, systemPrompt, userPrompt) {
   });
   if (!resp.ok) {
     const body = await resp.text();
-    throw new Error(`本机桥接失败 ${resp.status}: ${body.slice(0, 160)}`);
+    let message = body;
+    try {
+      const data = JSON.parse(body);
+      message = data?.error || body;
+    } catch {}
+    throw new Error(`本机桥接失败 ${resp.status}: ${String(message || '').slice(0, 160)}`);
   }
   const ct = resp.headers.get('content-type') || '';
   if (!ct.includes('application/json')) {
@@ -1232,10 +1247,10 @@ function notifyCsv(data) {
 }
 
 // 注入悬浮按钮到页面
-function injectFloatingBtn(tabId, status, index, total, filled) {
+function injectFloatingBtn(tabId, status, index, total, filled, actionLabel = '点击 → 下一个域名') {
   return chrome.scripting.executeScript({
     target: { tabId },
-    func: (status, index, total, filled) => {
+    func: (status, index, total, filled, actionLabel) => {
       document.getElementById('__wl_float_btn')?.remove();
       const div = document.createElement('div');
       div.id = '__wl_float_btn';
@@ -1251,7 +1266,7 @@ function injectFloatingBtn(tabId, status, index, total, filled) {
       div.innerHTML =
         `<div style="font-size:10px;opacity:.7;margin-bottom:3px">[${index}/${total}] 外链助手</div>` +
         `<div>${status}</div>` +
-        `<div style="font-size:11px;margin-top:4px;opacity:.8">点击 → 下一个域名</div>`;
+        `<div style="font-size:11px;margin-top:4px;opacity:.8">${actionLabel}</div>`;
       div.onclick = () => {
         div.style.background = '#374151';
         div.innerHTML = '<div style="padding:4px 0">⏳ 跳转中...</div>';
@@ -1259,7 +1274,7 @@ function injectFloatingBtn(tabId, status, index, total, filled) {
       };
       document.body.appendChild(div);
     },
-    args: [status, index, total, filled],
+    args: [status, index, total, filled, actionLabel],
   }).catch(() => {});
 }
 
@@ -1369,25 +1384,19 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       await chrome.tabs.update(workerTab.id, { url, active: true });
     } catch (e) {
       notifyCsv({ type: 'log', msg: `  ✗ 无法导航: ${e.message}`, logType: 'err' });
-      await injectFloatingBtn(workerTab.id, '导航失败，点击跳过', i+1, domains.length, false);
-      await waitForNext();
       continue;
     }
 
     const timedOut = await waitForTabLoad(workerTab.id, 30000);
     if (timedOut) {
       notifyCsv({ type: 'log', msg: `  ✗ 加载超时(30s)`, logType: 'err' });
-      await injectFloatingBtn(workerTab.id, '页面加载超时，点击跳过', i+1, domains.length, false);
-      await waitForNext();
       continue;
     }
-    await sleep(1200);
+    await sleep(700);
 
     let signals = await extractPageSignals(workerTab.id);
     if (!signals) {
-      logStep('  ✗ 页面信号提取失败', 'err');
-      await injectFloatingBtn(workerTab.id, '页面识别失败，点击跳过 →', i+1, domains.length, false);
-      await waitForNext();
+      logStep('  ✗ 页面信号提取失败，自动跳过', 'err');
       continue;
     }
 
@@ -1420,11 +1429,9 @@ async function csvSubmitLoop(domains, config, aiConfig) {
         const subTimedOut = await waitForTabLoad(workerTab.id, 30000);
         if (subTimedOut) {
           logStep('  ✗ 子页加载超时', 'err');
-          await injectFloatingBtn(workerTab.id, '子页加载超时，点击跳过 →', i+1, domains.length, false);
-          await waitForNext();
           continue;
         }
-        await sleep(1800);
+        await sleep(900);
         signals = await extractPageSignals(workerTab.id);
         signals = await autoAdvanceToActionablePage(workerTab.id, signals, logStep);
         try {
@@ -1438,8 +1445,8 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
     if (needsLogin) {
       logStep('  ⚠ 检测到登录页，等待你登录后继续', 'info');
-      await injectFloatingBtn(workerTab.id, '检测到登录页，请登录后点击继续 →', i+1, domains.length, false);
-      await waitForNext();
+      await injectFloatingBtn(workerTab.id, '检测到登录页，请先登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
+      await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
       if (csvStop) break;
 
       signals = await extractPageSignals(workerTab.id);
@@ -1460,15 +1467,15 @@ async function csvSubmitLoop(domains, config, aiConfig) {
     }
 
     if (skipReason && !hasActionableForm(signals) && !needsLogin) {
-      logStep(`  ⊘ 跳过: ${skipReason}`, 'info');
-      await injectFloatingBtn(workerTab.id, `跳过: ${skipReason}`, i+1, domains.length, false);
-      await waitForNext();
+      logStep(`  ⊘ 跳过: ${skipReason}，自动下一个`, 'info');
       continue;
     }
 
     if (needsLogin) {
-      await injectFloatingBtn(workerTab.id, '仍在登录页，点击跳过 →', i+1, domains.length, false);
-      await waitForNext();
+      await injectFloatingBtn(workerTab.id, '仍在登录页，请完成登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
+      await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
+      if (csvStop) break;
+      i -= 1;
       continue;
     }
 
@@ -1502,13 +1509,13 @@ async function csvSubmitLoop(domains, config, aiConfig) {
 
           await sleep(stepInstr.wait_ms || 2000);
           await waitForTabLoad(workerTab.id, 15000);
-          await sleep(1500);
+          await sleep(800);
 
           signals = await extractPageSignals(workerTab.id);
           if (isLoginPage(signals, null, '')) {
             logStep('  ⚠ 中间步骤进入登录页，等你登录后继续', 'info');
-            await injectFloatingBtn(workerTab.id, '中间步骤进入登录页，请登录后点击继续 →', i+1, domains.length, false);
-            await waitForNext();
+            await injectFloatingBtn(workerTab.id, '中间步骤进入登录页，请先登录', i+1, domains.length, false, '点击 → 登录完成，继续识别');
+            await waitForNext({ tabId: workerTab.id, autoResumeLogin: true });
             if (csvStop) break;
             signals = await extractPageSignals(workerTab.id);
           }
@@ -1552,12 +1559,13 @@ async function csvSubmitLoop(domains, config, aiConfig) {
       const filledLabel = signals?.hasCaptcha || instructions?.has_captcha
         ? '已填写表单，如有验证码请先处理，提交后点击下一步 →'
         : '已填写表单，请手动提交后点击下一步 →';
-      await injectFloatingBtn(workerTab.id, filledLabel, i+1, domains.length, true);
+      await injectFloatingBtn(workerTab.id, filledLabel, i+1, domains.length, true, '点击 → 提交完成，下一个域名');
     } else if (hasActionableForm(signals)) {
       logStep('  ⚠ 已识别到表单，当前等待你人工检查并提交', 'info');
-      await injectFloatingBtn(workerTab.id, '已识别到表单，请检查后提交，完成后点击下一步 →', i+1, domains.length, true);
+      await injectFloatingBtn(workerTab.id, '已识别到表单，请检查后提交', i+1, domains.length, true, '点击 → 提交完成，下一个域名');
     } else {
-      await injectFloatingBtn(workerTab.id, '未识别到入口，点击跳过 →', i+1, domains.length, false);
+      logStep('  ⊘ 未识别到入口，自动跳过', 'info');
+      continue;
     }
 
     // 等待用户点击悬浮按钮
@@ -1570,6 +1578,32 @@ async function csvSubmitLoop(domains, config, aiConfig) {
   csvStop = false;
 }
 
-function waitForNext() {
-  return new Promise(resolve => { csvNextResolve = resolve; });
+function waitForNext(options = {}) {
+  return new Promise(resolve => {
+    let settled = false;
+    let polling = false;
+    let timer = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearInterval(timer);
+      if (csvNextResolve === finish) csvNextResolve = null;
+      resolve();
+    };
+
+    csvNextResolve = finish;
+
+    if (options.autoResumeLogin && options.tabId) {
+      timer = setInterval(async () => {
+        if (settled || csvStop || polling) return;
+        polling = true;
+        try {
+          const signals = await extractPageSignals(options.tabId);
+          if (signals && !isLoginPage(signals, null, '')) finish();
+        } catch {}
+        polling = false;
+      }, options.intervalMs || 2000);
+    }
+  });
 }
